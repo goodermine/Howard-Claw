@@ -1,0 +1,51 @@
+# Android / Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Kotlin
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+
+# Signing
+*.jks
+*.keystore
+!debug.keystore
+
+# Node.js (bundled runtime assets)
+node_modules/
+*.tgz
+
+# Model files (too large for git)
+*.gguf
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Environment
+.env
+.env.local
+local.properties
