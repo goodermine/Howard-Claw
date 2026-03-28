@@ -30,19 +30,19 @@
 | Create Android Studio project skeleton | Gradle + Kotlin + Compose + NDK/CMake config |
 | Integrate llama.cpp as git submodule | Add to `app/src/main/cpp/`, configure CMakeLists.txt |
 | Build JNI bridge | `howard_jni.cpp` with loadModel, runInference, stopInference, freeModel |
-| Prove local inference works | Load a Q4_K_M 0.6B model and generate tokens on a real ARM64 device |
-| Measure performance | Record tok/s, RAM usage, thermal behaviour on 2–3 devices |
-| Test ForegroundService persistence | Run a dummy service for 30+ minutes across Pixel, Samsung, and one other OEM |
-| Document findings | Update feasibility doc with real measurements |
+| Prove local inference works | Load Q4_K_M 0.6B and 7B models and generate tokens on the REDMAGIC 10S Pro |
+| Measure performance | Record tok/s, RAM usage, thermal behaviour with fan on/off for multiple model sizes |
+| Test ForegroundService persistence | Run a dummy service for 60+ minutes on the REDMAGIC with screen off |
+| Document findings | Update TARGET_HARDWARE.md and ANDROID_FEASIBILITY.md with real measurements |
 
-**Dependencies:** Android Studio, NDK, physical ARM64 test device(s)
+**Dependencies:** Android Studio, NDK, REDMAGIC 10S Pro
 
 **Risks:**
 - llama.cpp NDK build may require patches for Android-specific issues
 - JNI memory management bugs (native heap vs JVM heap)
-- Performance may be worse than estimated
+- Performance may differ from estimates
 
-**Success criteria:** A bare APK that loads a 0.6B model, generates tokens via JNI, and displays them in a minimal Compose UI. Measured performance numbers documented.
+**Success criteria:** A bare APK that loads a 7B model on the REDMAGIC 10S Pro, generates tokens via JNI at >5 tok/s, and displays them in a minimal Compose UI. Measured performance numbers documented.
 
 ## Phase 3: Minimum Working Version
 
@@ -54,14 +54,15 @@
 |---|---|
 | ChatScreen + ChatViewModel | Compose LazyColumn, streaming token display, input bar |
 | LocalEngine | llama.cpp JNI wrapper with streaming callback |
-| CloudEngine | OkHttp SSE against OpenAI-compatible endpoints (start with one provider) |
-| EngineRouter | Hot-swap between local and cloud |
+| CloudEngine | OkHttp SSE against OpenAI-compatible endpoints — OpenRouter (free models), Ollama, OpenAI, Anthropic, Gemini |
+| EngineRouter | Hot-swap between local, cloud, and self-hosted (Ollama) |
 | ModelDownloader | HTTP download with range-request resume, WorkManager integration |
 | ModelRegistry | Catalog of available models with RAM-based filtering |
 | DeviceDetector | RAM and SoC detection |
 | Room database | Messages table with conversation support |
-| SecurePrefs | EncryptedSharedPreferences for API keys |
-| Basic onboarding | Model download step + optional API key entry |
+| SecurePrefs | EncryptedSharedPreferences for API keys, GitHub PAT, Ollama URL |
+| GitHub integration | Personal access token entry, clone/pull/push via JGit or GitHub API |
+| Basic onboarding | Model download step + API key entry + GitHub token + Ollama server URL |
 | Navigation | NavHost with chat and settings screens |
 
 **Dependencies:** Phase 2 proof of concept validated
@@ -71,7 +72,7 @@
 - Model download reliability (large files, interrupted downloads)
 - Memory management during inference
 
-**Success criteria:** User can install APK, download a model, chat locally with streaming responses, and switch to cloud inference with an API key. App does not crash during normal use.
+**Success criteria:** User can install APK, download a model, chat locally with streaming responses, switch to cloud inference (including OpenRouter free models and Ollama), and push/pull GitHub repos with a PAT. App does not crash during normal use.
 
 ## Phase 4: System Hardening
 

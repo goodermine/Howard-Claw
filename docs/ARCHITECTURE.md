@@ -72,16 +72,21 @@ Howard is a native Android application built with Kotlin and Jetpack Compose. It
 - `stopInference()`
 - `freeModel()`
 
-CPU-only inference. No GPU offloading available on Android NDK as of early 2026. Expected performance: 3–8 tokens/sec for Q4_K_M models on Snapdragon 8 Gen 2/3.
+CPU-only inference. No GPU offloading available on Android NDK as of early 2026. Expected performance: 8–15 tokens/sec for Q4_K_M models on Snapdragon 8 Elite (primary dev device), 3–8 tokens/sec on Snapdragon 8 Gen 2/3.
 
 **CloudEngine** — OkHttp SSE streaming against OpenAI-compatible `/chat/completions` endpoints. Supports:
 
-| Provider | Base URL | Auth |
-|---|---|---|
-| OpenAI | api.openai.com/v1 | Bearer token |
-| Anthropic | api.anthropic.com/v1 | x-api-key header |
-| Gemini | generativelanguage.googleapis.com/v1beta/openai | Bearer token |
-| OpenRouter | openrouter.ai/api/v1 | Bearer token |
+| Provider | Base URL | Auth | Notes |
+|---|---|---|---|
+| OpenAI | api.openai.com/v1 | Bearer token | Paid |
+| Anthropic | api.anthropic.com/v1 | x-api-key header | Paid |
+| Gemini | generativelanguage.googleapis.com/v1beta/openai | Bearer token | Free tier available |
+| OpenRouter | openrouter.ai/api/v1 | Bearer token | Free models available (e.g. llama-3.1-8b-instruct:free) |
+| Ollama | User-configured (e.g. 192.168.1.x:11434/v1) | None (local network) | Self-hosted, free, any model size |
+
+OpenRouter deserves special mention: it provides access to free models (rate-limited but functional) via the same OpenAI-compatible API. This gives users a zero-cost cloud fallback without running local inference. Users configure their OpenRouter API key and can select from free-tier models.
+
+Ollama support allows users running a local Ollama server (on a home machine, VPS, or even another device on the same network) to use it as an inference backend. The base URL is user-configurable since Ollama can run anywhere. This is especially useful for accessing larger models (13B, 70B) that cannot run on the phone.
 
 **EngineRouter** — holds one active engine. User switches between local and cloud via UI chips. Hot-swappable.
 
@@ -100,16 +105,18 @@ The agent system uses a simple token-based command protocol:
 
 | Tool | Purpose | Android Constraints |
 |---|---|---|
-| github_sync | Clone or pull a git repo | Requires git binary or JGit library |
+| github_sync | Clone or pull a git repo via GitHub API or JGit | Requires user's GitHub personal access token |
+| github_push | Commit and push changes to a GitHub repo | Requires GitHub PAT with repo scope |
 | file_organizer | Sort files by extension | Limited to app-accessible directories (scoped storage) |
 | web_component_gen | Scaffold a React component | Writes to app-internal storage only |
 | telegram_send | Send a Telegram message | Requires bot token configured |
-| shell | Execute a bash command | **Severely limited** on Android — sandboxed, no system access |
+
+**GitHub integration:** Users enter their GitHub personal access token (PAT) during onboarding or in settings. The token is stored in `EncryptedSharedPreferences` alongside API keys. GitHub operations (clone, pull, push, commit) use either the GitHub REST API or JGit library. The PAT requires `repo` scope for private repository access.
 
 ### Data Layer
 
 - **Room database** (`HowardDatabase`): tables for `messages`, `task_history`, `model_registry`
-- **EncryptedSharedPreferences** (`SecurePrefs`): AES256-GCM storage for API keys, bot tokens, and configuration. Keys never leave the device.
+- **EncryptedSharedPreferences** (`SecurePrefs`): AES256-GCM storage for API keys, GitHub personal access token, Telegram bot token, Ollama server URL, and configuration. Secrets never leave the device.
 - **Model files**: stored in `filesDir/models/`. Downloaded via `ModelDownloader` with HTTP range-request resume support.
 
 ### Services

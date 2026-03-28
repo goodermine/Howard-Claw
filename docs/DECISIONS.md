@@ -69,24 +69,24 @@
 
 ---
 
-## ADR-004: Remove Shell Passthrough Tool
+## ADR-004: Replace Shell Passthrough with Specific Tools
 
 **Date:** March 2026
-**Status:** Proposed
+**Status:** Accepted
 
-**Context:** The original design includes a `shell` tool that executes arbitrary bash commands from LLM output. On Android, the app sandbox severely restricts what shell commands can do. Combined with LLM hallucination risk, this creates a security concern with minimal utility.
+**Context:** The original design includes a `shell` tool that executes arbitrary bash commands from LLM output. On Android, the app sandbox restricts what shell commands can do. Combined with LLM hallucination risk, this creates a security concern.
 
-**Decision:** Remove the `shell` tool from the initial design. Replace with specific, sandboxed operations.
+**Decision:** Replace the generic `shell` tool with specific, purpose-built tools. May reconsider as an opt-in developer-mode feature later.
 
 **Rationale:**
 - Android app sandbox limits shell to a tiny subset of commands
 - LLM-generated shell commands are unpredictable and potentially destructive
-- Specific tools (file_ops, git_sync, telegram_send) are safer and more useful
-- Can be reconsidered as an opt-in advanced feature with explicit user confirmation per command
+- Specific tools (file_ops, github_sync, github_push, telegram_send) are safer and more useful
+- For the developer's own use on the REDMAGIC, a sandboxed shell could be re-added later behind a developer toggle
 
 **Consequences:**
-- Reduced attack surface
-- Less flexible for power users
+- Reduced attack surface for Play Store users
+- Less flexible for power users initially
 - Specific tools must cover the most common use cases
 
 ---
@@ -130,3 +130,70 @@
 - Repo does not contain runnable code (yet)
 - Clear separation between "designed" and "built"
 - Forces validation of assumptions before writing production code
+
+---
+
+## ADR-007: GitHub Integration via Personal Access Token
+
+**Date:** March 2026
+**Status:** Accepted
+
+**Context:** Howard needs to push and pull GitHub repos for on-the-go development. Options: (a) OAuth app flow, (b) GitHub App, (c) personal access token (PAT).
+
+**Decision:** Use personal access tokens (fine-grained or classic) entered by the user and stored in EncryptedSharedPreferences.
+
+**Rationale:**
+- Simplest integration — no OAuth redirect server, no app registration needed
+- User already has a GitHub account and can generate a PAT in settings
+- PAT with `repo` scope covers clone, pull, push for both public and private repos
+- Stored encrypted on-device, never transmitted to any Howard server
+- JGit library provides pure-Java git operations with PAT auth — no git binary needed
+
+**Consequences:**
+- User must manually create and paste a PAT (slightly less smooth than OAuth)
+- PAT has broad access if using classic tokens (recommend fine-grained tokens)
+- Token rotation is the user's responsibility
+
+---
+
+## ADR-008: Multi-Provider Cloud with Free Tier Priority
+
+**Date:** March 2026
+**Status:** Accepted
+
+**Context:** Users should not need to pay for API access to get value from Howard. The original design listed only paid providers.
+
+**Decision:** Support OpenRouter free-tier models and Ollama (self-hosted) as first-class inference backends alongside paid providers.
+
+**Rationale:**
+- OpenRouter offers free models (e.g. `llama-3.1-8b-instruct:free`) via the same OpenAI-compatible API. Rate-limited but functional for light use.
+- Ollama is a popular local inference server. Users running it on a home machine or VPS get free access to any model size. The API is OpenAI-compatible.
+- This creates a clear cost ladder: free local → free cloud (OpenRouter) → free self-hosted (Ollama) → paid cloud
+- Reduces friction for new users who don't want to enter credit card details immediately
+
+**Consequences:**
+- OpenRouter free tier is rate-limited; UI must handle rate limit errors gracefully
+- Ollama requires a user-configurable base URL (not a fixed endpoint)
+- Settings UI needs per-provider configuration sections
+
+---
+
+## ADR-009: Developer-First, Play Store Second
+
+**Date:** March 2026
+**Status:** Accepted
+
+**Context:** The original design targeted Play Store non-technical users from the start. The actual development situation is: one developer building for their own REDMAGIC 10S Pro first.
+
+**Decision:** Develop for personal use first. Optimise for the REDMAGIC 10S Pro. Play Store distribution is Phase 5, not Phase 1.
+
+**Rationale:**
+- Building for yourself produces better software — you use it daily and feel the friction
+- The REDMAGIC 10S Pro (24GB RAM, active cooling, 1TB storage) is a best-case hardware target — proves what's possible before compromising for weaker devices
+- Play Store requirements (broad device support, polished UX, privacy policy, data safety form) add overhead that's premature during core development
+- Sideloading APKs for testing is trivially easy
+
+**Consequences:**
+- Early versions may rely on hardware features (24GB RAM, active cooling) that most phones lack
+- Must add DeviceDetector-based feature gating before Play Store
+- UX may be rough initially — acceptable for developer use, must be polished for Play Store
