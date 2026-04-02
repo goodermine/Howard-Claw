@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Howard</string>
+    <string name="app_tagline">Your mobile-first AI agent</string>
+
+    <!-- Onboarding -->
+    <string name="notice_title">Welcome to Howard</string>
+    <string name="notice_subtitle">Your mobile-first AI agent</string>
+    <string name="notice_cta">Got it</string>
+    <string name="onboarding_step_model">Choose Model</string>
+    <string name="onboarding_step_keys">API Keys</string>
+    <string name="onboarding_step_openclaw">OpenClaw</string>
+    <string name="onboarding_step_telegram">Telegram</string>
+
+    <!-- Chat -->
+    <string name="chat_placeholder">Message Howard…</string>
+    <string name="chat_empty_title">Howard is ready</string>
+    <string name="chat_empty_subtitle">Ask me anything or give me a task</string>
+    <string name="chat_stop">Stop</string>
+    <string name="chat_thinking">Howard is thinking…</string>
+
+    <!-- Errors -->
+    <string name="error_model_not_found">No model downloaded. Go to Settings then Models.</string>
+    <string name="error_gateway_offline">OpenClaw gateway is offline. Restart the app.</string>
+    <string name="error_inference_failed">Inference failed. Check your model or API key.</string>
+    <string name="error_telegram_no_token">No Telegram bot token. Add one in Settings.</string>
+
+    <!-- Notifications -->
+    <string name="notif_gateway_online">Howard online</string>
+    <string name="notif_gateway_starting">Howard is starting…</string>
+    <string name="notif_inference_ready">Howard inference ready</string>
+</resources>

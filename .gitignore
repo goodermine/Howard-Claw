@@ -26,9 +26,11 @@
 *.keystore
 !debug.keystore
 
-# Node.js (bundled runtime assets)
+# Node.js (bundled runtime assets — downloaded by scripts/bundle_assets.sh)
 node_modules/
 *.tgz
+app/src/main/assets/node/
+app/src/main/assets/openclaw.tar.gz
 
 # Model files (too large for git)
 *.gguf
