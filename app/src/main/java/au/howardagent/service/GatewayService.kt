@@ -117,10 +117,10 @@ class GatewayService : Service() {
             """.trimIndent())
         }
 
-        // Find the entry point
-        val entryPoint = File(openclawDir, "index.js").let {
+        // Find the entry point (OpenClaw's package.json: main = "dist/index.js")
+        val entryPoint = File(openclawDir, "dist/index.js").let {
             if (it.exists()) it.absolutePath
-            else File(openclawDir, "bin/openclaw").absolutePath
+            else File(openclawDir, "openclaw.mjs").absolutePath
         }
 
         Log.i(TAG, "Starting Node: ${nodeBin.absolutePath} $entryPoint")
