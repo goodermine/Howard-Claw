@@ -51,3 +51,6 @@ Thumbs.db
 .env
 .env.local
 local.properties
+
+# Kotlin build cache
+.kotlin/
