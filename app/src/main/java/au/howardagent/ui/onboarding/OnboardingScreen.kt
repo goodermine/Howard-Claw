@@ -60,8 +60,8 @@ fun OnboardingScreen(
                     0 -> NoticeStep(onNext = { step = 1 })
                     1 -> Step1_ModelDownload(prefs = prefs, onNext = { step = 2 })
                     2 -> Step2_CloudKeys(prefs = prefs, onNext = { step = 3 })
-                    3 -> Step3_OpenClaw(prefs = prefs, onNext = { step = 4 })
-                    4 -> Step4_Telegram(prefs = prefs, onNext = {
+                    3 -> OpenClawStep(prefs = prefs, onNext = { step = 4 })
+                    4 -> ConnectStep(prefs = prefs, onNext = {
                         prefs.onboardingComplete = true
                         onComplete()
                     })

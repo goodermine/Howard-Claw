@@ -15,7 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Circle
-import androidx.compose.material.icons.outlined.Error
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -209,7 +209,7 @@ private fun StatusRow(
             }
             StepStatus.ERROR -> {
                 Icon(
-                    imageVector = Icons.Outlined.Error,
+                    imageVector = Icons.Filled.Warning,
                     contentDescription = "Error",
                     modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.error

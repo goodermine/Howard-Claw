@@ -1,11 +1,22 @@
 #include <jni.h>
 #include <android/log.h>
 #include <string>
+#include <vector>
 #include "llama.h"
 
 #define TAG "HowardJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+// Inline helper (replaces removed llama_batch_add from common)
+static void howard_batch_add(struct llama_batch & batch, llama_token id, llama_pos pos, llama_seq_id seq_id, bool logits) {
+    batch.token   [batch.n_tokens] = id;
+    batch.pos     [batch.n_tokens] = pos;
+    batch.n_seq_id[batch.n_tokens] = 1;
+    batch.seq_id  [batch.n_tokens][0] = seq_id;
+    batch.logits  [batch.n_tokens] = logits ? 1 : 0;
+    batch.n_tokens++;
+}
 
 static llama_model  *g_model   = nullptr;
 static llama_context *g_ctx    = nullptr;
@@ -97,12 +108,12 @@ Java_au_howardagent_engine_LocalEngine_runInference(
     tokens.resize(n_prompt_tokens);
 
     // Clear KV cache
-    llama_kv_cache_clear(g_ctx);
+    llama_memory_clear(llama_get_memory(g_ctx), true);
 
     // Process prompt in batch
     llama_batch batch = llama_batch_init(n_prompt_tokens, 0, 1);
     for (int i = 0; i < n_prompt_tokens; i++) {
-        llama_batch_add(batch, tokens[i], i, {0}, false);
+        howard_batch_add(batch, tokens[i], i, 0, false);
     }
     batch.logits[batch.n_tokens - 1] = true;
 
@@ -149,7 +160,7 @@ Java_au_howardagent_engine_LocalEngine_runInference(
 
         // Decode next
         llama_batch next_batch = llama_batch_init(1, 0, 1);
-        llama_batch_add(next_batch, new_token, n_cur, {0}, true);
+        howard_batch_add(next_batch, new_token, n_cur, 0, true);
         if (llama_decode(g_ctx, next_batch) != 0) {
             llama_batch_free(next_batch);
             jstring err = env->NewStringUTF("Decode failed during generation");

@@ -30,7 +30,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -332,7 +332,7 @@ private fun ToolResultBubble(message: ChatMessage) {
             verticalAlignment = Alignment.Top
         ) {
             Icon(
-                imageVector = Icons.Outlined.Terminal,
+                imageVector = Icons.Filled.Build,
                 contentDescription = "Tool result",
                 modifier = Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSecondaryContainer
