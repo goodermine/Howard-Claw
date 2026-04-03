@@ -3,6 +3,7 @@ package au.howardagent.ui.settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -96,8 +97,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                 item { Text("Configuration", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
 
-                item { SettingsRow(Icons.Default.SmartToy, "Models", "Manage local models") { subScreen = "models" } }
-                item { SettingsRow(Icons.Default.Key, "API Keys", "Cloud provider keys") { subScreen = "apikeys" } }
+                item { SettingsRow(Icons.Default.Build, "Models", "Manage local models") { subScreen = "models" } }
+                item { SettingsRow(Icons.Default.Lock, "API Keys", "Cloud provider keys") { subScreen = "apikeys" } }
                 item { SettingsRow(Icons.Default.Send, "Telegram", "Bot token & channel") { subScreen = "telegram" } }
 
                 item { Spacer(Modifier.height(4.dp)) }
@@ -132,7 +133,7 @@ fun SettingsRow(icon: ImageVector, title: String, subtitle: String, onClick: () 
                 Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

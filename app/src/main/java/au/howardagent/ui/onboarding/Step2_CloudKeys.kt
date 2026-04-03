@@ -4,8 +4,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -146,7 +146,7 @@ private fun ApiKeyField(
             trailingIcon = {
                 IconButton(onClick = { visible = !visible }) {
                     Icon(
-                        if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        if (visible) Icons.Default.Lock else Icons.Default.Person,
                         contentDescription = if (visible) "Hide" else "Show"
                     )
                 }

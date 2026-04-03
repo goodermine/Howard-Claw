@@ -27,19 +27,17 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import au.howardagent.data.local.AppDatabase
-import au.howardagent.data.local.TaskEntity
+import au.howardagent.data.HowardDatabase
+import au.howardagent.data.TaskEntity
 
 data class ToolUi(
     val id: String,
@@ -84,14 +82,8 @@ private val availableTools = listOf(
 @Composable
 fun ToolsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val database = remember { AppDatabase.getInstance(context) }
-    var recentTasks by remember { mutableStateOf<List<TaskEntity>>(emptyList()) }
-
-    LaunchedEffect(Unit) {
-        try {
-            recentTasks = database.taskDao().getRecentTasks(limit = 10)
-        } catch (_: Exception) { }
-    }
+    val database = remember { HowardDatabase.getInstance(context) }
+    val recentTasks by database.taskDao().getRecentTasks(10).collectAsState(initial = emptyList())
 
     Scaffold(
         topBar = {
@@ -227,7 +219,7 @@ private fun TaskLogRow(task: TaskEntity) {
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = task.taskName,
+                    text = "${task.tool}: ${task.task}",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(

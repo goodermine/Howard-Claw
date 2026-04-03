@@ -31,6 +31,7 @@ data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
     val isGenerating: Boolean = false,
     val activeProvider: String = "local",
+    val gatewayStatus: String = "offline",
     val error: String? = null
 )
 
@@ -103,16 +104,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             tokensPerSec = finalTokPerSec
                         ))
 
-                        // Dispatch any [CMD:] tokens
-                        for (match in cmdPattern.findAll(finalContent)) {
-                            val cmdText = match.groupValues[1].trim()
-                            val result = dispatcher.dispatch(cmdText)
-                            val toolMsg = ChatMessage(role = "tool", content = result)
-                            appendMessage(toolMsg)
-                            persistMessage(toolMsg)
-                        }
-
                         _uiState.update { it.copy(isGenerating = false) }
+
+                        // Dispatch any [CMD:] tokens
+                        val commands = cmdPattern.findAll(finalContent).toList()
+                        if (commands.isNotEmpty()) {
+                            viewModelScope.launch {
+                                for (match in commands) {
+                                    val cmdText = match.groupValues[1].trim()
+                                    val result = dispatcher.dispatch(cmdText)
+                                    val toolMsg = ChatMessage(role = "tool", content = result)
+                                    appendMessage(toolMsg)
+                                    persistMessage(toolMsg)
+                                }
+                            }
+                        }
                     },
                     onError = { error ->
                         removeMessage(streamingId)

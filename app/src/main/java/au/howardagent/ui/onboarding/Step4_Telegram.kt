@@ -25,24 +25,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import au.howardagent.security.SecurePrefs
-import au.howardagent.telegram.TelegramConnector
+import au.howardagent.data.SecurePrefs
+import au.howardagent.connectors.TelegramConnector
 import kotlinx.coroutines.launch
 
 @Composable
 fun ConnectStep(
-    onComplete: () -> Unit
+    prefs: SecurePrefs,
+    onNext: () -> Unit
 ) {
-    val context = LocalContext.current
-    val prefs = remember { SecurePrefs(context) }
     val scope = rememberCoroutineScope()
+    val connector = remember { TelegramConnector(prefs) }
 
-    var botToken by remember { mutableStateOf(prefs.getString("telegram_bot_token", "") ?: "") }
-    var channelId by remember { mutableStateOf(prefs.getString("telegram_channel_id", "") ?: "") }
-    var pollingEnabled by remember { mutableStateOf(prefs.getBoolean("telegram_polling_enabled", false)) }
+    var botToken by remember { mutableStateOf(prefs.telegramBotToken) }
+    var channelId by remember { mutableStateOf(prefs.telegramChannelId) }
+    var pollingEnabled by remember { mutableStateOf(prefs.telegramEnabled) }
     var testResult by remember { mutableStateOf<String?>(null) }
     var testSuccess by remember { mutableStateOf(false) }
     var isTesting by remember { mutableStateOf(false) }
@@ -98,7 +97,7 @@ fun ConnectStep(
             value = botToken,
             onValueChange = { value ->
                 botToken = value
-                prefs.putString("telegram_bot_token", value)
+                prefs.telegramBotToken = value
             },
             label = { Text("Bot Token") },
             placeholder = { Text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ") },
@@ -113,7 +112,7 @@ fun ConnectStep(
             value = channelId,
             onValueChange = { value ->
                 channelId = value
-                prefs.putString("telegram_channel_id", value)
+                prefs.telegramChannelId = value
             },
             label = { Text("Channel ID") },
             placeholder = { Text("@your_channel or -1001234567890") },
@@ -130,12 +129,10 @@ fun ConnectStep(
                 testResult = null
                 scope.launch {
                     try {
-                        val result = TelegramConnector.testConnection(botToken)
-                        testSuccess = result.success
-                        testResult = if (result.success) {
-                            "@${result.username}"
-                        } else {
-                            result.errorMessage ?: "Connection failed"
+                        val result = connector.testConnection()
+                        testSuccess = result.isSuccess
+                        testResult = result.getOrElse { e ->
+                            e.message ?: "Connection failed"
                         }
                     } catch (e: Exception) {
                         testSuccess = false
@@ -208,7 +205,7 @@ fun ConnectStep(
                 checked = pollingEnabled,
                 onCheckedChange = { enabled ->
                     pollingEnabled = enabled
-                    prefs.putBoolean("telegram_polling_enabled", enabled)
+                    prefs.telegramEnabled = enabled
                 }
             )
         }
@@ -217,7 +214,7 @@ fun ConnectStep(
 
         // Continue button
         Button(
-            onClick = onComplete,
+            onClick = onNext,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Continue")

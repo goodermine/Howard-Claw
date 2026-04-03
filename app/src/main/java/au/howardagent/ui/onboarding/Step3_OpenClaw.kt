@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -34,7 +33,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import au.howardagent.openclaw.OpenClawConnector
+import au.howardagent.connectors.OpenClawConnector
+import au.howardagent.data.SecurePrefs
 import kotlinx.coroutines.delay
 
 enum class StepStatus {
@@ -46,9 +46,10 @@ enum class StepStatus {
 
 @Composable
 fun OpenClawStep(
-    connector: OpenClawConnector,
-    onComplete: () -> Unit
+    prefs: SecurePrefs,
+    onNext: () -> Unit
 ) {
+    val connector = remember { OpenClawConnector() }
     var nodeStatus by remember { mutableStateOf(StepStatus.CHECKING) }
     var openClawStatus by remember { mutableStateOf(StepStatus.CHECKING) }
     var gatewayStatus by remember { mutableStateOf(StepStatus.CHECKING) }
@@ -75,14 +76,14 @@ fun OpenClawStep(
             gatewayStatus = StepStatus.LOADING
             var online = false
             for (attempt in 1..10) {
-                online = connector.isGatewayOnline()
+                online = connector.isOnline()
                 if (online) break
                 delay(2000)
             }
 
             if (online) {
                 gatewayStatus = StepStatus.DONE
-                onComplete()
+                onNext()
             } else {
                 gatewayStatus = StepStatus.ERROR
                 errorMessage = "Gateway did not come online after 10 attempts"
@@ -187,10 +188,10 @@ private fun StatusRow(
         when (status) {
             StepStatus.CHECKING -> {
                 Icon(
-                    imageVector = Icons.Outlined.Circle,
+                    imageVector = Icons.Filled.CheckCircle,
                     contentDescription = "Pending",
                     modifier = Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                 )
             }
             StepStatus.LOADING -> {
