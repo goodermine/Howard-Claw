@@ -11,6 +11,7 @@ This repository is in the **design and planning stage**. No buildable Android pr
 - Android feasibility analysis (validated against real target hardware)
 - Source code designs (Kotlin) for all major components — preserved as reference
 - Phased implementation roadmap
+- Field test troubleshooting runbook for model download and gateway startup failures
 
 **What does not exist yet:**
 - Android Studio project / Gradle build system
@@ -66,7 +67,8 @@ Howard-Claw/
 │   ├── TARGET_HARDWARE.md          # Primary device specs and role
 │   ├── SETUP_PLAN.md               # Build steps (for when code exists)
 │   ├── ROADMAP.md                  # Phased implementation plan
-│   └── DECISIONS.md                # Architectural decision log
+│   ├── DECISIONS.md                # Architectural decision log
+│   └── TROUBLESHOOTING.md          # Field runbook for startup/download failures
 └── archive/
     ├── HOWARD_CLAUDE_CODE_HANDOFF.md   # Original design handoff document
     └── howard-complete-apk.jsx         # Original code viewer artifact
