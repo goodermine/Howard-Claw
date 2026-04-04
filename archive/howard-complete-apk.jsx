@@ -970,6 +970,7 @@ class OpenClawConnector {
     companion object {
         private const val TAG      = "OpenClawConnector"
         private const val BASE_URL = "http://127.0.0.1:18789"
+        private val HEALTH_PATHS   = listOf("/health", "/api/health", "/healthz", "/")
     }
 
     private val client = OkHttpClient.Builder()
@@ -977,13 +978,37 @@ class OpenClawConnector {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    data class OnlineCheckResult(
+        val online: Boolean,
+        val checkedPath: String? = null,
+        val error: String? = null
+    )
+
     // ── Health check ───────────────────────────────────────────────────────
-    suspend fun isOnline(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val req = Request.Builder().url("\$BASE_URL/health").build()
-            client.newCall(req).execute().use { it.isSuccessful }
-        } catch (_: Exception) { false }
+    suspend fun checkOnlineDetailed(): OnlineCheckResult = withContext(Dispatchers.IO) {
+        var lastErr: String? = null
+
+        for (path in HEALTH_PATHS) {
+            try {
+                val req = Request.Builder().url("\$BASE_URL\$path").build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        return@withContext OnlineCheckResult(
+                            online = true,
+                            checkedPath = path
+                        )
+                    }
+                    lastErr = "HTTP \${resp.code} on \$path"
+                }
+            } catch (e: Exception) {
+                lastErr = e.message ?: e.javaClass.simpleName
+            }
+        }
+
+        OnlineCheckResult(online = false, error = lastErr)
     }
+
+    suspend fun isOnline(): Boolean = checkOnlineDetailed().online
 
     // ── Send task to OpenClaw gateway ──────────────────────────────────────
     suspend fun sendTask(task: String): Result<String> = withContext(Dispatchers.IO) {
@@ -1052,18 +1077,30 @@ fun OpenClawStep() {
     val connector = remember { OpenClawConnector() }
     var status    by remember { mutableStateOf<StepStatus>(StepStatus.CHECKING) }
     var retries   by remember { mutableIntStateOf(0) }
-    val scope     = rememberCoroutineScope()
+    var detail    by remember { mutableStateOf("Waiting for gateway readiness…") }
 
     LaunchedEffect(retries) {
         status = StepStatus.CHECKING
+        detail = "Waiting for gateway readiness…"
+
+        // Give extraction/startup phase a chance to settle.
         delay(1500)
-        repeat(10) {
-            if (connector.isOnline()) {
+
+        // Exponential backoff: 1s, 2s, 4s, ... up to 8s (about 60s total window).
+        var backoffMs = 1000L
+        repeat(10) { attempt ->
+            val result = connector.checkOnlineDetailed()
+            if (result.online) {
                 status = StepStatus.DONE
+                detail = "Gateway health check passed on \${result.checkedPath ?: "/health"}"
                 return@LaunchedEffect
             }
-            delay(2000)
+
+            detail = "Attempt \${attempt + 1}/10 failed\${if (result.error != null) ": \${result.error}" else ""}"
+            delay(backoffMs)
+            backoffMs = (backoffMs * 2).coerceAtMost(8000L)
         }
+
         status = StepStatus.ERROR
     }
 
@@ -1104,6 +1141,13 @@ fun OpenClawStep() {
             }
         }
 
+        Text(
+            detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (status == StepStatus.ERROR) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
         AnimatedVisibility(visible = status == StepStatus.DONE) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9))
@@ -1119,7 +1163,7 @@ fun OpenClawStep() {
 
         AnimatedVisibility(visible = status == StepStatus.ERROR) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Gateway not responding — it may still be starting.",
+                Text("Gateway not responding after extended checks.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(8.dp))
