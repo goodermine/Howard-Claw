@@ -12,14 +12,14 @@ echo "════════════════════════�
 # ── 1. Add llama.cpp as git submodule ────────────────────────────────────────
 echo ""
 echo "[1/3] Adding llama.cpp submodule..."
-if [ ! -d "app/src/main/cpp/llama.cpp/.git" ]; then
+if [ ! -e "app/src/main/cpp/llama.cpp/.git" ]; then
     git submodule add https://github.com/ggml-org/llama.cpp \
-        app/src/main/cpp/llama.cpp
+        app/src/main/cpp/llama.cpp 2>/dev/null || true
     git submodule update --init --recursive
     echo "    Done: llama.cpp submodule added"
 else
     echo "    llama.cpp already present, updating..."
-    git submodule update --remote app/src/main/cpp/llama.cpp
+    git submodule update --init app/src/main/cpp/llama.cpp 2>/dev/null || true
 fi
 
 # ── 2. Generate debug keystore ───────────────────────────────────────────────

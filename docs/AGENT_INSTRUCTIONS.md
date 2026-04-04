@@ -6,28 +6,57 @@ https://github.com/goodermine/Howard-Claw
 Branch: claude/audit-android-openclaw-OjMw0
 ```
 
-## If building from source
+## Building from source
 
-**Prerequisites:** Java 17+, Android SDK (platform 35, build-tools 34+, NDK r26b), CMake 3.22+, Node.js 22+, npm
+### One-command build (recommended)
+
+**Prerequisites:** Java 17+, Node.js 22+, npm, curl, unzip. The script installs the Android SDK automatically.
 
 ```bash
-# Clone
+git clone -b claude/audit-android-openclaw-OjMw0 https://github.com/goodermine/Howard-Claw
+cd Howard-Claw
+bash scripts/build_apk.sh
+```
+
+This single script handles everything:
+1. Downloads & installs Android SDK (platform 35, build-tools 34+35, NDK r26b)
+2. Accepts SDK licenses
+3. Writes `local.properties`
+4. Inits llama.cpp submodule + generates debug keystore
+5. Downloads Node.js ARM64 binary + OpenClaw npm package into assets
+6. Configures Gradle proxy settings (critical for CI/cloud environments)
+7. Builds the APK
+
+**Output:** `app/build/outputs/apk/debug/app-debug.apk` (~224MB)
+
+### Important: Proxy environments (Claude Code, CI)
+
+The biggest build blocker in proxy environments is that `JAVA_TOOL_OPTIONS` puts `*.google.com` in `nonProxyHosts`, which prevents Gradle from reaching `maven.google.com` to fetch dependencies. The `build_apk.sh` script handles this automatically by:
+- Writing `~/.gradle/gradle.properties` with proxy auth credentials
+- Removing google.com from the non-proxy bypass list
+- Unsetting `JAVA_TOOL_OPTIONS` before running Gradle
+
+If building manually, you MUST either:
+1. Run `JAVA_TOOL_OPTIONS="" ./gradlew assembleDebug` (after configuring `~/.gradle/gradle.properties`), or
+2. Use the `build_apk.sh` script which does this for you
+
+### Manual step-by-step (if the one-command build fails)
+
+```bash
 git clone -b claude/audit-android-openclaw-OjMw0 https://github.com/goodermine/Howard-Claw
 cd Howard-Claw
 
 # 1. Init submodules + debug keystore
-./scripts/init_project.sh
+bash scripts/init_project.sh
 
 # 2. Bundle Node.js ARM64 + OpenClaw into assets (~248MB)
-./scripts/bundle_assets.sh
+bash scripts/bundle_assets.sh
 
-# 3. Set SDK path
-echo "sdk.dir=/path/to/android-sdk" > local.properties
+# 3. Set SDK path (adjust path to your Android SDK)
+echo "sdk.dir=/opt/android-sdk" > local.properties
 
-# 4. Build
-./gradlew assembleDebug
-
-# APK output: app/build/outputs/apk/debug/app-debug.apk (~224MB)
+# 4. Build (MUST unset JAVA_TOOL_OPTIONS in proxy environments)
+JAVA_TOOL_OPTIONS="" ./gradlew assembleDebug --no-daemon
 ```
 
 ## If APK is already installed on the REDMAGIC 10S Pro
