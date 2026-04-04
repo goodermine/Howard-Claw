@@ -30,6 +30,7 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
     val downloader = remember { ModelDownloader(context) }
     var downloadingId by remember { mutableStateOf<String?>(null) }
     var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
     var downloadedIds by remember {
         mutableStateOf(models.filter { downloader.isDownloaded(it) }.map { it.id }.toSet())
     }
@@ -70,15 +71,22 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
                     isDownloaded = model.id in downloadedIds,
                     isDownloading = downloadingId == model.id,
                     progress = if (downloadingId == model.id) downloadProgress else 0f,
+                    error = if (downloadError != null && downloadingId == null) downloadError else null,
                     onDownload = {
                         scope.launch {
                             downloadingId = model.id
                             downloadProgress = 0f
-                            downloader.download(model).collect { progress ->
-                                downloadProgress = progress
+                            downloadError = null
+                            try {
+                                downloader.download(model).collect { progress ->
+                                    downloadProgress = progress
+                                }
+                                downloadedIds = downloadedIds + model.id
+                            } catch (e: Exception) {
+                                downloadError = e.message ?: "Download failed"
+                            } finally {
+                                downloadingId = null
                             }
-                            downloadedIds = downloadedIds + model.id
-                            downloadingId = null
                         }
                     }
                 )
@@ -102,6 +110,7 @@ private fun ModelCard(
     isDownloaded: Boolean,
     isDownloading: Boolean,
     progress: Float,
+    error: String? = null,
     onDownload: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -149,6 +158,15 @@ private fun ModelCard(
                     text = "${(progress * 100).toInt()}%",
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+
+            if (error != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             }
         }

@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -141,7 +142,7 @@ fun OpenClawStep(
             }
         }
 
-        // Error message and retry
+        // Error message and retry / skip
         if (errorMessage != null) {
             Spacer(modifier = Modifier.height(16.dp))
             Text(
@@ -161,6 +162,13 @@ fun OpenClawStep(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Retry")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onNext,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Skip — Continue Without Gateway")
             }
         }
 

@@ -20,6 +20,14 @@ class ModelDownloader(private val context: Context) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("User-Agent", "Howard-Agent/1.0 (Android)")
+                    .build()
+            )
+        }
         .build()
 
     private val modelsDir = File(context.filesDir, "models").also { it.mkdirs() }

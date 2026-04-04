@@ -1,5 +1,6 @@
 package au.howardagent
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import au.howardagent.service.GatewayService
 import au.howardagent.ui.chat.ChatScreen
 import au.howardagent.ui.onboarding.OnboardingScreen
 import au.howardagent.ui.settings.SettingsScreen
@@ -24,6 +26,9 @@ class MainActivity : ComponentActivity() {
 
         val prefs = HowardApplication.instance.securePrefs
         val startDest = if (prefs.onboardingComplete) "chat" else "onboarding"
+
+        // Start the OpenClaw gateway service
+        startForegroundService(Intent(this, GatewayService::class.java))
 
         setContent {
             HowardTheme {
