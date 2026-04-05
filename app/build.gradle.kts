@@ -88,9 +88,6 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
 
-    // Embedded HTTP server
-    implementation(libs.nanohttpd)
-
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
 

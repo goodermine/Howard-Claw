@@ -5,15 +5,11 @@ import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import au.howardagent.HowardApplication
 import au.howardagent.R
-import fi.iki.elonen.NanoHTTPD
-import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
+import au.howardagent.connectors.OpenClawConnector
+import kotlinx.coroutines.*
+import java.io.File
+import java.io.FileOutputStream
 
 class GatewayService : Service() {
 
@@ -24,21 +20,18 @@ class GatewayService : Service() {
         const val GATEWAY_PORT = 18789
     }
 
-    private var server: HowardGatewayServer? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var nodeProcess: Process? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         startForeground(NOTIF_ID, buildNotification("Starting OpenClaw gateway..."))
 
-        try {
-            server = HowardGatewayServer(GATEWAY_PORT)
-            server?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            Log.i(TAG, "Gateway server started on port $GATEWAY_PORT")
-            updateNotification("Howard online — port $GATEWAY_PORT")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start gateway: ${e.message}", e)
-            updateNotification("Gateway error: ${e.message}")
+        scope.launch {
+            extractAssetsIfNeeded()
+            startNodeProcess()
+            monitorGateway()
         }
     }
 
@@ -49,9 +42,122 @@ class GatewayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        server?.stop()
-        server = null
+        nodeProcess?.destroyForcibly()
+        scope.cancel()
         super.onDestroy()
+    }
+
+    private fun extractAssetsIfNeeded() {
+        val runtimeDir = File(filesDir, "runtime")
+        val marker     = File(runtimeDir, ".extracted")
+
+        if (marker.exists()) {
+            Log.i(TAG, "Assets already extracted")
+            return
+        }
+
+        Log.i(TAG, "Extracting assets...")
+        runtimeDir.mkdirs()
+
+        // Node.js binary is in nativeLibraryDir as libnode.so — placed there
+        // automatically by Android from jniLibs/arm64-v8a/ at install time.
+        // No extraction needed for it.
+
+        // Extract OpenClaw package (JavaScript — still bundled in assets)
+        val openclawTar = File(runtimeDir, "openclaw.tar.gz")
+        assets.open("openclaw.tar.gz").use { input ->
+            FileOutputStream(openclawTar).use { output ->
+                input.copyTo(output)
+            }
+        }
+
+        // Untar OpenClaw
+        val pb = ProcessBuilder("tar", "-xzf", openclawTar.absolutePath, "-C", runtimeDir.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        pb.waitFor()
+        openclawTar.delete()
+        Log.i(TAG, "OpenClaw extracted")
+
+        marker.createNewFile()
+        updateNotification("Assets extracted")
+    }
+
+    private fun startNodeProcess() {
+        val runtimeDir   = File(filesDir, "runtime")
+        val nativeLibDir = applicationInfo.nativeLibraryDir
+        val nodeBin      = File(nativeLibDir, "libnode.so")
+        val openclawDir  = File(runtimeDir, "openclaw")
+
+        if (!nodeBin.exists()) {
+            Log.e(TAG, "Node binary not found at ${nodeBin.absolutePath}")
+            updateNotification("Error: Node binary missing")
+            return
+        }
+
+        Log.i(TAG, "Node binary: ${nodeBin.absolutePath} (${nodeBin.length()} bytes)")
+
+        // Create tmp directory for OpenClaw
+        val tmpDir = File(filesDir, "tmp").also { it.mkdirs() }
+
+        // Create OpenClaw config
+        val configDir = File(filesDir, ".openclaw").also { it.mkdirs() }
+        val configFile = File(configDir, "openclaw.json")
+        if (!configFile.exists()) {
+            configFile.writeText("""
+                {
+                    "port": $GATEWAY_PORT,
+                    "host": "127.0.0.1"
+                }
+            """.trimIndent())
+        }
+
+        // Find the entry point (OpenClaw's package.json: main = "dist/index.js")
+        val entryPoint = File(openclawDir, "dist/index.js").let {
+            if (it.exists()) it.absolutePath
+            else File(openclawDir, "openclaw.mjs").absolutePath
+        }
+
+        Log.i(TAG, "Starting Node: ${nodeBin.absolutePath} $entryPoint")
+
+        val pb = ProcessBuilder(nodeBin.absolutePath, entryPoint)
+            .directory(openclawDir)
+            .redirectErrorStream(true)
+
+        // LD_LIBRARY_PATH must point to nativeLibraryDir so Node.js can find
+        // its shared library dependencies (ICU, libc++, etc.)
+        pb.environment()["LD_LIBRARY_PATH"] = nativeLibDir
+        pb.environment()["TMPDIR"] = tmpDir.absolutePath
+        pb.environment()["HOME"]   = filesDir.absolutePath
+        pb.environment()["PORT"]   = GATEWAY_PORT.toString()
+        pb.environment()["OPENCLAW_CONFIG"] = configFile.absolutePath
+
+        nodeProcess = pb.start()
+
+        // Stream stdout to logcat
+        scope.launch {
+            try {
+                nodeProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
+                    Log.i(TAG, "[node] $line")
+                }
+            } catch (_: Exception) {}
+        }
+
+        updateNotification("Howard online - port $GATEWAY_PORT")
+    }
+
+    private suspend fun monitorGateway() {
+        val connector = OpenClawConnector()
+        while (scope.isActive) {
+            delay(30_000) // Check every 30s
+
+            if (nodeProcess?.isAlive != true) {
+                Log.w(TAG, "Node process died, restarting in 5s...")
+                updateNotification("Gateway restarting...")
+                delay(5000)
+                startNodeProcess()
+            }
+        }
     }
 
     private fun createNotificationChannel() {
@@ -74,208 +180,5 @@ class GatewayService : Service() {
     private fun updateNotification(text: String) {
         getSystemService(NotificationManager::class.java)
             .notify(NOTIF_ID, buildNotification(text))
-    }
-}
-
-/**
- * In-process HTTP server implementing OpenAI-compatible /v1/chat/completions,
- * /health, and /api/message endpoints. Replaces the Node.js + OpenClaw gateway.
- */
-private class HowardGatewayServer(port: Int) : NanoHTTPD(port) {
-
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .build()
-
-    override fun serve(session: IHTTPSession): Response {
-        val uri = session.uri
-        val method = session.method
-
-        return when {
-            uri == "/health" -> {
-                newFixedLengthResponse(Response.Status.OK, "application/json", """{"status":"ok"}""")
-            }
-
-            uri == "/api/message" && method == Method.POST -> {
-                handleMessage(session)
-            }
-
-            uri == "/v1/chat/completions" && method == Method.POST -> {
-                handleChatCompletions(session)
-            }
-
-            uri == "/v1/models" && method == Method.GET -> {
-                handleListModels()
-            }
-
-            else -> {
-                newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json",
-                    """{"error":"Not found","path":"$uri"}""")
-            }
-        }
-    }
-
-    private fun handleMessage(session: IHTTPSession): Response {
-        val body = readBody(session)
-        val json = JSONObject(body)
-        val message = json.optString("message", "")
-
-        if (message.isBlank()) {
-            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json",
-                """{"error":"Missing 'message' field"}""")
-        }
-
-        // Convert simple message to chat completions format and forward
-        val chatBody = JSONObject().apply {
-            put("model", "default")
-            put("messages", JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("content", message)
-            }))
-        }
-
-        val result = forwardToProvider(chatBody)
-        return newFixedLengthResponse(Response.Status.OK, "application/json", result)
-    }
-
-    private fun handleChatCompletions(session: IHTTPSession): Response {
-        val body = readBody(session)
-        val json = JSONObject(body)
-        val result = forwardToProvider(json)
-        return newFixedLengthResponse(Response.Status.OK, "application/json", result)
-    }
-
-    private fun handleListModels(): Response {
-        val prefs = HowardApplication.instance.securePrefs
-        val models = JSONArray()
-
-        if (prefs.openaiKey.isNotBlank()) models.put(modelObj("openai/gpt-4o"))
-        if (prefs.anthropicKey.isNotBlank()) models.put(modelObj("anthropic/claude-sonnet-4-20250514"))
-        if (prefs.geminiKey.isNotBlank()) models.put(modelObj("gemini/gemini-2.0-flash"))
-        if (prefs.openrouterKey.isNotBlank()) models.put(modelObj("openrouter/auto"))
-        models.put(modelObj("local/default"))
-
-        val response = JSONObject().apply {
-            put("object", "list")
-            put("data", models)
-        }
-        return newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
-    }
-
-    private fun modelObj(id: String): JSONObject = JSONObject().apply {
-        put("id", id)
-        put("object", "model")
-        put("owned_by", id.substringBefore("/"))
-    }
-
-    /**
-     * Forward a chat completions request to the active cloud provider.
-     * Falls through providers in priority order: OpenAI > Anthropic > Gemini > OpenRouter.
-     */
-    private fun forwardToProvider(chatBody: JSONObject): String {
-        val prefs = HowardApplication.instance.securePrefs
-
-        // Try providers in order
-        return when {
-            prefs.openaiKey.isNotBlank() -> forwardOpenAI(chatBody, prefs.openaiKey)
-            prefs.anthropicKey.isNotBlank() -> forwardAnthropic(chatBody, prefs.anthropicKey)
-            prefs.geminiKey.isNotBlank() -> forwardGemini(chatBody, prefs.geminiKey)
-            prefs.openrouterKey.isNotBlank() -> forwardOpenRouter(chatBody, prefs.openrouterKey)
-            else -> JSONObject().apply {
-                put("error", JSONObject().apply {
-                    put("message", "No API keys configured. Add keys in Settings.")
-                    put("type", "configuration_error")
-                })
-            }.toString()
-        }
-    }
-
-    private fun forwardOpenAI(chatBody: JSONObject, apiKey: String): String {
-        if (!chatBody.has("model") || chatBody.getString("model") == "default") {
-            chatBody.put("model", "gpt-4o")
-        }
-        return proxyPost(
-            url = "https://api.openai.com/v1/chat/completions",
-            body = chatBody.toString(),
-            headers = mapOf("Authorization" to "Bearer $apiKey")
-        )
-    }
-
-    private fun forwardAnthropic(chatBody: JSONObject, apiKey: String): String {
-        // Convert OpenAI format to Anthropic format
-        val messages = chatBody.getJSONArray("messages")
-        val anthropicBody = JSONObject().apply {
-            put("model", "claude-sonnet-4-20250514")
-            put("max_tokens", chatBody.optInt("max_tokens", 4096))
-            put("messages", messages)
-        }
-        return proxyPost(
-            url = "https://api.anthropic.com/v1/messages",
-            body = anthropicBody.toString(),
-            headers = mapOf(
-                "x-api-key" to apiKey,
-                "anthropic-version" to "2023-06-01"
-            )
-        )
-    }
-
-    private fun forwardGemini(chatBody: JSONObject, apiKey: String): String {
-        // Convert to Gemini format
-        val messages = chatBody.getJSONArray("messages")
-        val contents = JSONArray()
-        for (i in 0 until messages.length()) {
-            val msg = messages.getJSONObject(i)
-            val role = if (msg.getString("role") == "assistant") "model" else "user"
-            contents.put(JSONObject().apply {
-                put("role", role)
-                put("parts", JSONArray().put(JSONObject().put("text", msg.getString("content"))))
-            })
-        }
-        val geminiBody = JSONObject().put("contents", contents)
-        return proxyPost(
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey",
-            body = geminiBody.toString(),
-            headers = emptyMap()
-        )
-    }
-
-    private fun forwardOpenRouter(chatBody: JSONObject, apiKey: String): String {
-        if (!chatBody.has("model") || chatBody.getString("model") == "default") {
-            chatBody.put("model", "openai/gpt-4o")
-        }
-        return proxyPost(
-            url = "https://openrouter.ai/api/v1/chat/completions",
-            body = chatBody.toString(),
-            headers = mapOf("Authorization" to "Bearer $apiKey")
-        )
-    }
-
-    private fun proxyPost(url: String, body: String, headers: Map<String, String>): String {
-        val reqBody = body.toRequestBody("application/json".toMediaType())
-        val reqBuilder = Request.Builder().url(url).post(reqBody)
-        headers.forEach { (k, v) -> reqBuilder.addHeader(k, v) }
-        reqBuilder.addHeader("User-Agent", "Howard-Agent/1.0")
-
-        return try {
-            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
-                resp.body?.string() ?: """{"error":"Empty response from provider"}"""
-            }
-        } catch (e: Exception) {
-            Log.e("GatewayServer", "Proxy error: ${e.message}", e)
-            JSONObject().apply {
-                put("error", JSONObject().apply {
-                    put("message", "Provider request failed: ${e.message}")
-                    put("type", "proxy_error")
-                })
-            }.toString()
-        }
-    }
-
-    private fun readBody(session: IHTTPSession): String {
-        val contentLength = session.headers["content-length"]?.toIntOrNull() ?: 0
-        val buf = ByteArray(contentLength)
-        session.inputStream.read(buf, 0, contentLength)
-        return String(buf)
     }
 }
