@@ -8,9 +8,8 @@
 
     <!-- Foreground service for inference and gateway -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Restart after reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -26,7 +25,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Howard"
-        tools:targetApi="35">
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
@@ -41,19 +40,12 @@
         <!-- Inference foreground service -->
         <service
             android:name=".service.InferenceService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Local LLM inference and Telegram task polling" />
-        </service>
+            android:exported="false" />
 
         <!-- OpenClaw gateway foreground service -->
         <service
             android:name=".service.GatewayService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync">
-        </service>
+            android:exported="false" />
 
         <!-- Boot receiver -->
         <receiver

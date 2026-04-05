@@ -27,14 +27,13 @@
 *.keystore
 !debug.keystore
 
-# Node.js + OpenClaw runtime (downloaded by scripts/bundle_assets.sh)
+# Termux bootstrap + Node.js + OpenClaw (downloaded by scripts/bundle_assets.sh)
 node_modules/
 *.tgz
-app/src/main/assets/node/
+app/src/main/assets/bootstrap-aarch64.zip
+app/src/main/assets/node-supplement.tar.gz
 app/src/main/assets/openclaw.tar.gz
-# Android-compatible Node.js binary + deps (Termux builds, placed by bundle script)
-app/src/main/jniLibs/arm64-v8a/libnode.so
-app/src/main/jniLibs/arm64-v8a/libicu*.so
+app/src/main/assets/node/
 
 # Model files (too large for git)
 *.gguf

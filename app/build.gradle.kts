@@ -12,7 +12,11 @@ android {
     defaultConfig {
         applicationId = "au.howardagent"
         minSdk = 26
-        targetSdk = 35
+        // targetSdk 28 required to allow executing Termux Node.js binaries
+        // from app data directories. Android 10+ (targetSdk 29+) enforces W^X
+        // via SELinux, blocking execution from app-private storage.
+        // This is the same approach used by codexUI/AnyClaw and Termux (F-Droid).
+        targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
 

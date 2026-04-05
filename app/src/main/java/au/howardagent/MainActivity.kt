@@ -27,8 +27,12 @@ class MainActivity : ComponentActivity() {
         val prefs = HowardApplication.instance.securePrefs
         val startDest = if (prefs.onboardingComplete) "chat" else "onboarding"
 
-        // Start the OpenClaw gateway service
-        startForegroundService(Intent(this, GatewayService::class.java))
+        // Start the OpenClaw gateway service (gracefully handles missing assets)
+        try {
+            startForegroundService(Intent(this, GatewayService::class.java))
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to start GatewayService: ${e.message}")
+        }
 
         setContent {
             HowardTheme {
