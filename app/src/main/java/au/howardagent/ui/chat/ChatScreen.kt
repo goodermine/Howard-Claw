@@ -30,10 +30,6 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -234,7 +230,14 @@ private fun ModelSwitcher(
     activeProvider: String,
     onProviderSelected: (String) -> Unit
 ) {
-    val providers = listOf("local", "openai", "anthropic", "gemini", "openrouter", "ollama")
+    val providers = listOf(
+        "local" to "Local GGUF",
+        "openai" to "ChatGPT",
+        "anthropic" to "Claude",
+        "gemini" to "Gemini",
+        "openrouter" to "OpenRouter",
+        "ollama" to "Ollama",
+    )
 
     LazyRow(
         modifier = Modifier
@@ -242,11 +245,11 @@ private fun ModelSwitcher(
             .padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(providers) { provider ->
+        items(providers, key = { it.first }) { (id, label) ->
             FilterChip(
-                selected = provider == activeProvider,
-                onClick = { onProviderSelected(provider) },
-                label = { Text(provider.replaceFirstChar { it.uppercase() }) }
+                selected = id == activeProvider,
+                onClick = { onProviderSelected(id) },
+                label = { Text(label) }
             )
         }
     }

@@ -33,10 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import au.howardagent.connectors.OpenClawConnector
 import au.howardagent.data.SecurePrefs
+import au.howardagent.service.BootstrapInstaller
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 enum class StepStatus {
     CHECKING,
@@ -50,33 +54,73 @@ fun OpenClawStep(
     prefs: SecurePrefs,
     onNext: () -> Unit
 ) {
+    val context = LocalContext.current
     val connector = remember { OpenClawConnector() }
+    var bootstrapStatus by remember { mutableStateOf(StepStatus.CHECKING) }
     var nodeStatus by remember { mutableStateOf(StepStatus.CHECKING) }
     var openClawStatus by remember { mutableStateOf(StepStatus.CHECKING) }
     var gatewayStatus by remember { mutableStateOf(StepStatus.CHECKING) }
+    var statusDetail by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var retryTrigger by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(retryTrigger) {
         errorMessage = null
-        nodeStatus = StepStatus.LOADING
+        bootstrapStatus = StepStatus.LOADING
+        nodeStatus = StepStatus.CHECKING
         openClawStatus = StepStatus.CHECKING
         gatewayStatus = StepStatus.CHECKING
+        statusDetail = ""
 
         try {
-            // Step 1: Node.js extraction
-            delay(500)
-            nodeStatus = StepStatus.DONE
+            // Step 1: Bootstrap extraction
+            withContext(Dispatchers.IO) {
+                if (BootstrapInstaller.isBootstrapInstalled(context)) {
+                    statusDetail = "Already installed"
+                } else {
+                    BootstrapInstaller.install(context) { msg ->
+                        statusDetail = msg
+                    }
+                }
+            }
+            bootstrapStatus = StepStatus.DONE
 
-            // Step 2: OpenClaw extraction
+            // Step 2: Check Node.js
+            nodeStatus = StepStatus.LOADING
+            statusDetail = "Checking Node.js..."
+            val paths = BootstrapInstaller.getPaths(context)
+            val nodeExists = withContext(Dispatchers.IO) {
+                java.io.File(paths.prefixDir, "bin/node").exists()
+            }
+            if (nodeExists) {
+                nodeStatus = StepStatus.DONE
+                statusDetail = "Node.js ready"
+            } else {
+                // Node.js will be installed by GatewayService
+                nodeStatus = StepStatus.DONE
+                statusDetail = "Node.js will install on gateway start"
+            }
+
+            // Step 3: Check OpenClaw
             openClawStatus = StepStatus.LOADING
-            delay(500)
-            openClawStatus = StepStatus.DONE
+            statusDetail = "Checking OpenClaw..."
+            val openclawExists = withContext(Dispatchers.IO) {
+                java.io.File(paths.prefixDir, "lib/node_modules/openclaw").exists()
+            }
+            if (openclawExists) {
+                openClawStatus = StepStatus.DONE
+                statusDetail = "OpenClaw ready"
+            } else {
+                openClawStatus = StepStatus.DONE
+                statusDetail = "OpenClaw will install on gateway start"
+            }
 
-            // Step 3: Gateway start - retry up to 10 times
+            // Step 4: Check gateway connectivity
             gatewayStatus = StepStatus.LOADING
+            statusDetail = "Checking gateway..."
             var online = false
             for (attempt in 1..10) {
+                statusDetail = "Connecting to gateway (attempt $attempt/10)..."
                 online = connector.isOnline()
                 if (online) break
                 delay(2000)
@@ -84,12 +128,15 @@ fun OpenClawStep(
 
             if (online) {
                 gatewayStatus = StepStatus.DONE
+                statusDetail = "Gateway online!"
                 onNext()
             } else {
                 gatewayStatus = StepStatus.ERROR
-                errorMessage = "Gateway did not come online after 10 attempts"
+                statusDetail = ""
+                errorMessage = "Gateway not yet online. It will start automatically. You can continue setup."
             }
         } catch (e: Exception) {
+            bootstrapStatus = if (bootstrapStatus == StepStatus.LOADING) StepStatus.ERROR else bootstrapStatus
             nodeStatus = if (nodeStatus == StepStatus.LOADING) StepStatus.ERROR else nodeStatus
             openClawStatus = if (openClawStatus == StepStatus.LOADING) StepStatus.ERROR else openClawStatus
             gatewayStatus = if (gatewayStatus == StepStatus.LOADING) StepStatus.ERROR else gatewayStatus
@@ -97,7 +144,8 @@ fun OpenClawStep(
         }
     }
 
-    val allDone = nodeStatus == StepStatus.DONE &&
+    val allDone = bootstrapStatus == StepStatus.DONE &&
+            nodeStatus == StepStatus.DONE &&
             openClawStatus == StepStatus.DONE &&
             gatewayStatus == StepStatus.DONE
 
@@ -121,7 +169,7 @@ fun OpenClawStep(
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Setting up the local AI gateway...",
+            text = "Setting up the local AI gateway with Termux + Node.js...",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -136,10 +184,21 @@ fun OpenClawStep(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                StatusRow(label = "Termux bootstrap", status = bootstrapStatus)
                 StatusRow(label = "Node.js runtime", status = nodeStatus)
                 StatusRow(label = "OpenClaw server", status = openClawStatus)
-                StatusRow(label = "Gateway start", status = gatewayStatus)
+                StatusRow(label = "Gateway connectivity", status = gatewayStatus)
             }
+        }
+
+        // Status detail text
+        if (statusDetail.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = statusDetail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         // Error message and retry / skip

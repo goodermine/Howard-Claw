@@ -17,7 +17,7 @@ enum class CloudProvider(
     val defaultModel: String,
     val authHeader: String
 ) {
-    OPENAI("https://api.openai.com/v1", "gpt-4o-mini", "Authorization"),
+    OPENAI("https://api.openai.com/v1", "gpt-4o", "Authorization"),
     ANTHROPIC("https://api.anthropic.com/v1", "claude-sonnet-4-6", "x-api-key"),
     GEMINI("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "Authorization"),
     OPENROUTER("https://openrouter.ai/api/v1", "meta-llama/llama-3.1-8b-instruct:free", "Authorization"),

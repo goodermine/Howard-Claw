@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "au.howardagent"
-        minSdk = 26
+        minSdk = 24
         // targetSdk 28 required to allow executing Termux Node.js binaries
         // from app data directories. Android 10+ (targetSdk 29+) enforces W^X
         // via SELinux, blocking execution from app-private storage.
@@ -60,6 +60,11 @@ android {
     }
 
     ndkVersion = "26.1.10909125"
+
+    // Don't compress bootstrap zip or tar.gz assets
+    androidResources {
+        noCompress += listOf("zip", "tar.gz")
+    }
 }
 
 dependencies {

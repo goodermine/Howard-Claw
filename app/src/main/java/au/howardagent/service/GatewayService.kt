@@ -1,28 +1,29 @@
 package au.howardagent.service
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import au.howardagent.R
-import au.howardagent.connectors.OpenClawConnector
 import kotlinx.coroutines.*
+import java.io.BufferedReader
 import java.io.File
-import java.io.FileOutputStream
-import java.util.zip.ZipInputStream
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * Foreground service that manages the OpenClaw gateway.
  *
- * Architecture (based on codexUI/AnyClaw):
- * - Extracts a Termux bootstrap environment into app-private storage
- * - Installs Node.js via the Termux package system
+ * Architecture (ported from codexUI/AnyClaw):
+ * - Uses BootstrapInstaller to extract Termux environment
+ * - Installs Node.js via Termux apt-get (downloaded .deb packages)
  * - Runs OpenClaw as a Node.js subprocess via ProcessBuilder
  * - Sets LD_PRELOAD=libtermux-exec.so for proper exec() behavior
  *
- * Requires targetSdk <= 28 to allow executing binaries from app data dirs
- * (Android 10+ with targetSdk 29+ enforces W^X via SELinux).
+ * Requires targetSdk <= 28 to allow executing binaries from app data dirs.
  */
 class GatewayService : Service() {
 
@@ -34,14 +35,7 @@ class GatewayService : Service() {
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var nodeProcess: Process? = null
-
-    // Termux-style paths rooted in app's private data dir
-    private val prefixDir by lazy { File(filesDir, "usr") }
-    private val binDir    by lazy { File(prefixDir, "bin") }
-    private val libDir    by lazy { File(prefixDir, "lib") }
-    private val homeDir   by lazy { File(filesDir, "home").also { it.mkdirs() } }
-    private val tmpDir    by lazy { File(filesDir, "tmp").also { it.mkdirs() } }
+    private var serverProcess: Process? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -50,10 +44,30 @@ class GatewayService : Service() {
 
         scope.launch {
             try {
-                extractBootstrapIfNeeded()
-                extractOpenClawIfNeeded()
-                startNodeProcess()
-                monitorGateway()
+                // Step 1: Extract Termux bootstrap
+                if (!BootstrapInstaller.isBootstrapInstalled(this@GatewayService)) {
+                    updateNotification("Extracting runtime environment...")
+                    BootstrapInstaller.install(this@GatewayService) { msg ->
+                        updateNotification(msg)
+                    }
+                }
+
+                // Step 2: Install Node.js if needed
+                val paths = BootstrapInstaller.getPaths(this@GatewayService)
+                if (!isNodeInstalled(paths)) {
+                    updateNotification("Installing Node.js...")
+                    installNode(paths) { msg -> updateNotification(msg) }
+                }
+
+                // Step 3: Extract OpenClaw if needed
+                if (!isOpenClawInstalled(paths)) {
+                    updateNotification("Installing OpenClaw...")
+                    extractOpenClaw(paths) { msg -> updateNotification(msg) }
+                }
+
+                // Step 4: Start the server
+                startServer(paths)
+                monitorServer(paths)
             } catch (e: Exception) {
                 Log.e(TAG, "Gateway startup failed: ${e.message}", e)
                 updateNotification("Gateway error: ${e.message}")
@@ -68,203 +82,247 @@ class GatewayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        nodeProcess?.destroyForcibly()
+        serverProcess?.destroyForcibly()
         scope.cancel()
         super.onDestroy()
     }
 
-    // ── Bootstrap extraction ────────────────────────────────────────────────
+    // ── Shell helpers (from codexUI) ───────────────────────────────────────
 
     /**
-     * Extract the Termux bootstrap environment (bootstrap-aarch64.zip) from
-     * assets into filesDir/usr/. This provides bin/sh, bin/node (after install),
-     * lib/libtermux-exec.so, and other essential binaries.
+     * Run a shell command inside the Termux prefix environment.
      */
-    private fun extractBootstrapIfNeeded() {
-        val marker = File(prefixDir, ".bootstrap_done")
-        if (marker.exists()) {
-            Log.i(TAG, "Bootstrap already extracted")
+    private fun runInPrefix(
+        paths: BootstrapInstaller.Paths,
+        command: String,
+        onOutput: ((String) -> Unit)? = null,
+    ): Int {
+        val env = buildEnvironment(paths)
+        val shell = "${paths.prefixDir}/bin/sh"
+
+        val pb = ProcessBuilder(shell, "-c", command)
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
+
+        val proc = pb.start()
+        val reader = BufferedReader(InputStreamReader(proc.inputStream))
+        var line = reader.readLine()
+        while (line != null) {
+            Log.d(TAG, line)
+            onOutput?.invoke(line)
+            line = reader.readLine()
+        }
+        return proc.waitFor()
+    }
+
+    // ── Install checks ─────────────────────────────────────────────────────
+
+    private fun isNodeInstalled(paths: BootstrapInstaller.Paths): Boolean {
+        return File(paths.prefixDir, "bin/node").exists()
+    }
+
+    private fun isOpenClawInstalled(paths: BootstrapInstaller.Paths): Boolean {
+        return File(paths.prefixDir, "lib/node_modules/openclaw").exists()
+    }
+
+    // ── Node.js installation (from codexUI pattern) ────────────────────────
+
+    /**
+     * Install Node.js from Termux packages using apt-get download + dpkg-deb extract.
+     * This avoids needing proot for basic Node.js installation.
+     */
+    private fun installNode(
+        paths: BootstrapInstaller.Paths,
+        onProgress: (String) -> Unit,
+    ) {
+        val prefix = paths.prefixDir
+        val termuxPrefix = "/data/data/com.termux/files/usr"
+
+        // First try to extract from bundled asset (node-supplement.tar.gz)
+        if (extractNodeSupplement(paths)) {
+            onProgress("Node.js extracted from bundle")
             return
         }
 
-        Log.i(TAG, "Extracting Termux bootstrap...")
-        updateNotification("Extracting runtime environment...")
-        prefixDir.mkdirs()
+        // Fall back to apt-get download
+        onProgress("Downloading Node.js packages…")
+        val downloadCmd = """
+            cd $prefix/tmp &&
+            apt-get update --allow-insecure-repositories 2>&1;
+            apt-get download --allow-unauthenticated c-ares libicu libsqlite nodejs-lts npm 2>&1
+        """.trimIndent()
 
-        try {
-            assets.open("bootstrap-aarch64.zip").use { input ->
-                ZipInputStream(input).use { zip ->
-                    var entry = zip.nextEntry
-                    while (entry != null) {
-                        val outFile = File(prefixDir, entry.name)
-                        if (entry.isDirectory) {
-                            outFile.mkdirs()
-                        } else {
-                            outFile.parentFile?.mkdirs()
-                            FileOutputStream(outFile).use { out ->
-                                zip.copyTo(out)
-                            }
-                        }
-                        zip.closeEntry()
-                        entry = zip.nextEntry
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract bootstrap: ${e.message}", e)
-            updateNotification("Error: Bootstrap extraction failed")
-            return
+        runInPrefix(paths, downloadCmd) { onProgress(it) }
+
+        onProgress("Extracting Node.js packages…")
+        val extractCmd = """
+            cd $prefix/tmp &&
+            mkdir -p _stage &&
+            for deb in *.deb; do
+                echo "Extracting ${'$'}deb..." &&
+                dpkg-deb -x "${'$'}deb" _stage/ 2>&1
+            done &&
+            if [ -d "_stage$termuxPrefix" ]; then
+                cp -a _stage$termuxPrefix/* "$prefix/" 2>&1
+            elif [ -d "_stage/usr" ]; then
+                cp -a _stage/usr/* "$prefix/" 2>&1
+            fi &&
+            rm -rf _stage *.deb 2>/dev/null
+            echo "done"
+        """.trimIndent()
+
+        val extractCode = runInPrefix(paths, extractCmd) { onProgress(it) }
+        if (extractCode != 0) {
+            Log.e(TAG, "dpkg-deb extract failed with code $extractCode")
         }
 
-        // Set execute permission on all binaries
-        binDir.listFiles()?.forEach { it.setExecutable(true, false) }
-        // Also set execute on libtermux-exec.so
-        File(libDir, "libtermux-exec.so").let {
-            if (it.exists()) it.setExecutable(true, false)
+        // Fix script shebangs and create wrapper scripts
+        onProgress("Fixing script paths…")
+        val appDataDir = filesDir.parentFile?.absolutePath ?: "/data/user/0/au.howardagent"
+        val fixCmd = """
+            chmod 700 "$prefix/bin/node" 2>/dev/null
+
+            NPM_CLI="$prefix/lib/node_modules/npm/bin/npm-cli.js"
+            if [ -f "${'$'}NPM_CLI" ]; then
+                rm -f "$prefix/bin/npm"
+                cat > "$prefix/bin/npm" << 'WEOF'
+#!/$appDataDir/files/usr/bin/sh
+exec $appDataDir/files/usr/bin/node $appDataDir/files/usr/lib/node_modules/npm/bin/npm-cli.js "${'$'}@"
+WEOF
+                chmod 700 "$prefix/bin/npm"
+            fi
+
+            echo "Wrapper scripts created"
+        """.trimIndent()
+        runInPrefix(paths, fixCmd) { onProgress(it) }
+
+        if (!isNodeInstalled(paths)) {
+            throw RuntimeException("Node.js installation failed")
         }
-
-        // Handle Termux symlinks file if present
-        // The bootstrap zip may contain a SYMLINKS.txt file listing symlinks to create
-        val symlinksFile = File(prefixDir, "SYMLINKS.txt")
-        if (symlinksFile.exists()) {
-            try {
-                symlinksFile.readLines().forEach { line ->
-                    val parts = line.split("←")
-                    if (parts.size == 2) {
-                        val target = parts[0].trim()
-                        val linkPath = parts[1].trim()
-                        val linkFile = File(prefixDir, linkPath)
-                        val targetFile = File(prefixDir, target)
-                        linkFile.parentFile?.mkdirs()
-                        // On Android, symlinks via Os.symlink
-                        try {
-                            android.system.Os.symlink(targetFile.absolutePath, linkFile.absolutePath)
-                        } catch (_: Exception) {
-                            // Fallback: copy file
-                            if (targetFile.exists()) targetFile.copyTo(linkFile, overwrite = true)
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Symlinks processing failed: ${e.message}")
-            }
-        }
-
-        marker.createNewFile()
-        Log.i(TAG, "Bootstrap extracted to ${prefixDir.absolutePath}")
-
-        // Extract Node.js supplement (node binary + npm) on top of bootstrap
-        extractNodeSupplement()
+        Log.i(TAG, "Node.js installed successfully")
     }
 
     /**
-     * Extract node-supplement.tar.gz (Node.js binary + npm from Termux) into
-     * the prefix directory, overlaying onto the bootstrap.
+     * Try to extract node-supplement.tar.gz from bundled assets.
      */
-    private fun extractNodeSupplement() {
+    private fun extractNodeSupplement(paths: BootstrapInstaller.Paths): Boolean {
         try {
-            assets.open("node-supplement.tar.gz").use { /* exists */ }
+            assets.open("node-supplement.tar.gz").use { /* exists check */ }
         } catch (_: Exception) {
-            Log.w(TAG, "No node-supplement.tar.gz in assets — Node.js not bundled")
-            return
+            return false
         }
 
-        Log.i(TAG, "Extracting Node.js supplement...")
-        val supplementTar = File(tmpDir, "node-supplement.tar.gz")
+        Log.i(TAG, "Extracting Node.js from bundled supplement...")
+        val tmpFile = File(paths.tmpDir, "node-supplement.tar.gz")
         try {
+            File(paths.tmpDir).mkdirs()
             assets.open("node-supplement.tar.gz").use { input ->
-                FileOutputStream(supplementTar).use { output ->
+                tmpFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
 
-            // Use system tar (available on most Android via toybox)
-            val pb = ProcessBuilder("tar", "-xzf", supplementTar.absolutePath,
-                "-C", prefixDir.absolutePath)
-                .redirectErrorStream(true)
-            val proc = pb.start()
-            val output = proc.inputStream.bufferedReader().readText()
-            val exitCode = proc.waitFor()
-            supplementTar.delete()
+            val exitCode = runInPrefix(paths,
+                "tar -xzf ${tmpFile.absolutePath} -C ${paths.prefixDir} && " +
+                "chmod 700 ${paths.prefixDir}/bin/node 2>/dev/null && " +
+                "echo done"
+            )
+            tmpFile.delete()
 
-            if (exitCode != 0) {
-                Log.e(TAG, "Node supplement extraction failed: $output")
-                return
+            if (exitCode == 0 && isNodeInstalled(paths)) {
+                Log.i(TAG, "Node.js supplement extracted successfully")
+                return true
             }
-
-            // Ensure node binary is executable
-            File(binDir, "node").setExecutable(true, false)
-            File(binDir, "npm").let { if (it.exists()) it.setExecutable(true, false) }
-            Log.i(TAG, "Node.js supplement extracted")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to extract Node supplement: ${e.message}", e)
         }
+        tmpFile.delete()
+        return false
     }
 
+    // ── OpenClaw installation ──────────────────────────────────────────────
+
     /**
-     * Extract OpenClaw package from assets/openclaw.tar.gz into the Termux
-     * prefix lib/node_modules/ directory.
+     * Extract OpenClaw from bundled asset or install via npm.
      */
-    private fun extractOpenClawIfNeeded() {
-        val openclawDir = File(libDir, "node_modules/openclaw")
-        val marker = File(openclawDir, ".openclaw_done")
-        if (marker.exists()) {
-            Log.i(TAG, "OpenClaw already extracted")
+    private fun extractOpenClaw(
+        paths: BootstrapInstaller.Paths,
+        onProgress: (String) -> Unit,
+    ) {
+        // Try bundled asset first
+        if (extractOpenClawFromAsset(paths)) {
+            onProgress("OpenClaw extracted from bundle")
             return
         }
 
-        Log.i(TAG, "Extracting OpenClaw...")
-        updateNotification("Extracting OpenClaw...")
+        // Fall back to npm install
+        if (!isNodeInstalled(paths)) {
+            throw RuntimeException("Node.js required to install OpenClaw via npm")
+        }
 
-        val runtimeDir = File(filesDir, "runtime")
-        runtimeDir.mkdirs()
+        onProgress("Installing OpenClaw via npm…")
+        val prefix = paths.prefixDir
+        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
 
+        val code = runInPrefix(paths,
+            "node $npmCli install -g openclaw 2>&1"
+        ) { onProgress(it) }
+
+        if (code != 0) {
+            Log.e(TAG, "npm install openclaw failed with code $code")
+            throw RuntimeException("OpenClaw installation failed")
+        }
+
+        Log.i(TAG, "OpenClaw installed via npm")
+    }
+
+    private fun extractOpenClawFromAsset(paths: BootstrapInstaller.Paths): Boolean {
         try {
-            val openclawTar = File(runtimeDir, "openclaw.tar.gz")
+            assets.open("openclaw.tar.gz").use { /* exists check */ }
+        } catch (_: Exception) {
+            return false
+        }
+
+        Log.i(TAG, "Extracting OpenClaw from bundled asset...")
+        val nodeModulesDir = File(paths.prefixDir, "lib/node_modules")
+        nodeModulesDir.mkdirs()
+
+        val tmpFile = File(paths.tmpDir, "openclaw.tar.gz")
+        try {
+            File(paths.tmpDir).mkdirs()
             assets.open("openclaw.tar.gz").use { input ->
-                FileOutputStream(openclawTar).use { output ->
+                tmpFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
 
-            // Use the Termux-provided tar if available, otherwise try system tar
-            val tarBin = File(binDir, "tar").let {
-                if (it.exists() && it.canExecute()) it.absolutePath else "tar"
+            val exitCode = runInPrefix(paths,
+                "tar -xzf ${tmpFile.absolutePath} -C ${nodeModulesDir.absolutePath} && echo done"
+            )
+            tmpFile.delete()
+
+            if (exitCode == 0 && isOpenClawInstalled(paths)) {
+                Log.i(TAG, "OpenClaw extracted from asset")
+                return true
             }
-
-            val nodeModulesDir = File(libDir, "node_modules")
-            nodeModulesDir.mkdirs()
-
-            val pb = ProcessBuilder(tarBin, "-xzf", openclawTar.absolutePath,
-                "-C", nodeModulesDir.absolutePath)
-                .redirectErrorStream(true)
-            pb.environment().putAll(buildEnvironment())
-            val proc = pb.start()
-            val output = proc.inputStream.bufferedReader().readText()
-            val exitCode = proc.waitFor()
-
-            if (exitCode != 0) {
-                Log.e(TAG, "tar extraction failed (exit $exitCode): $output")
-            }
-
-            openclawTar.delete()
-            marker.createNewFile()
-            Log.i(TAG, "OpenClaw extracted")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract OpenClaw: ${e.message}", e)
-            updateNotification("Error: OpenClaw extraction failed")
+            Log.e(TAG, "Failed to extract OpenClaw asset: ${e.message}", e)
         }
+        tmpFile.delete()
+        return false
     }
 
-    // ── Node.js process management ──────────────────────────────────────────
+    // ── Server lifecycle ───────────────────────────────────────────────────
 
-    private fun startNodeProcess() {
-        val nodeBin = File(binDir, "node")
-        val openclawDir = File(libDir, "node_modules/openclaw")
+    private fun startServer(paths: BootstrapInstaller.Paths) {
+        val nodeBin = File(paths.prefixDir, "bin/node")
+        val openclawDir = File(paths.prefixDir, "lib/node_modules/openclaw")
 
         if (!nodeBin.exists()) {
             Log.e(TAG, "Node binary not found at ${nodeBin.absolutePath}")
-            updateNotification("Error: Node.js not installed — run bundle_assets.sh")
+            updateNotification("Error: Node.js not installed")
             return
         }
 
@@ -275,13 +333,19 @@ class GatewayService : Service() {
         }
 
         // Find the entry point
-        val entryPoint = File(openclawDir, "dist/index.js").let {
-            if (it.exists()) it.absolutePath
-            else File(openclawDir, "openclaw.mjs").absolutePath
+        val entryPoint = when {
+            File(openclawDir, "dist/index.js").exists() -> File(openclawDir, "dist/index.js").absolutePath
+            File(openclawDir, "openclaw.mjs").exists() -> File(openclawDir, "openclaw.mjs").absolutePath
+            File(openclawDir, "index.js").exists() -> File(openclawDir, "index.js").absolutePath
+            else -> {
+                Log.e(TAG, "No OpenClaw entry point found")
+                updateNotification("Error: OpenClaw entry point not found")
+                return
+            }
         }
 
         // Create OpenClaw config
-        val configDir = File(homeDir, ".openclaw").also { it.mkdirs() }
+        val configDir = File(paths.homeDir, ".openclaw").also { it.mkdirs() }
         val configFile = File(configDir, "openclaw.json")
         if (!configFile.exists()) {
             configFile.writeText("""
@@ -292,23 +356,30 @@ class GatewayService : Service() {
             """.trimIndent())
         }
 
-        Log.i(TAG, "Starting Node: ${nodeBin.absolutePath} $entryPoint")
+        Log.i(TAG, "Starting server: node $entryPoint")
 
-        val pb = ProcessBuilder(nodeBin.absolutePath, entryPoint)
-            .directory(openclawDir)
-            .redirectErrorStream(true)
+        val env = buildEnvironment(paths)
+        val shell = "${paths.prefixDir}/bin/sh"
+        val command = "exec node $entryPoint"
 
-        pb.environment().putAll(buildEnvironment())
+        val pb = ProcessBuilder(shell, "-c", command)
+        pb.environment().clear()
+        pb.environment().putAll(env)
         pb.environment()["PORT"] = GATEWAY_PORT.toString()
         pb.environment()["OPENCLAW_CONFIG"] = configFile.absolutePath
+        pb.directory(openclawDir)
+        pb.redirectErrorStream(true)
 
-        nodeProcess = pb.start()
+        serverProcess = pb.start()
 
         // Stream stdout to logcat
         scope.launch {
             try {
-                nodeProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
-                    Log.i(TAG, "[node] $line")
+                val reader = BufferedReader(InputStreamReader(serverProcess!!.inputStream))
+                var line = reader.readLine()
+                while (line != null) {
+                    Log.i(TAG, "[openclaw] $line")
+                    line = reader.readLine()
                 }
             } catch (_: Exception) {}
         }
@@ -316,46 +387,71 @@ class GatewayService : Service() {
         updateNotification("Howard online — port $GATEWAY_PORT")
     }
 
-    /**
-     * Build the environment variables for Termux-style subprocess execution.
-     * Mirrors the approach from codexUI/AnyClaw.
-     */
-    private fun buildEnvironment(): Map<String, String> {
-        val termuxExecLib = File(libDir, "libtermux-exec.so")
-        val env = mutableMapOf(
-            "PREFIX" to prefixDir.absolutePath,
-            "HOME" to homeDir.absolutePath,
-            "TMPDIR" to tmpDir.absolutePath,
-            "PATH" to "${binDir.absolutePath}:${binDir.absolutePath}/applets:/system/bin",
-            "LD_LIBRARY_PATH" to libDir.absolutePath,
-            "TERMUX_PREFIX" to prefixDir.absolutePath,
-            "LANG" to "en_US.UTF-8",
-            "TERM" to "xterm-256color",
-        )
-        // LD_PRELOAD libtermux-exec.so for proper exec() behavior
-        if (termuxExecLib.exists()) {
-            env["LD_PRELOAD"] = termuxExecLib.absolutePath
-        }
-        // SSL certificates if available in Termux prefix
-        val caCerts = File(prefixDir, "etc/tls/cert.pem")
-        if (caCerts.exists()) {
-            env["SSL_CERT_FILE"] = caCerts.absolutePath
-            env["NODE_EXTRA_CA_CERTS"] = caCerts.absolutePath
-        }
-        return env
-    }
-
-    private suspend fun monitorGateway() {
-        val connector = OpenClawConnector()
+    private suspend fun monitorServer(paths: BootstrapInstaller.Paths) {
         while (scope.isActive) {
-            delay(30_000) // Check every 30s
+            delay(30_000)
 
-            if (nodeProcess?.isAlive != true) {
-                Log.w(TAG, "Node process died, restarting in 5s...")
+            val alive = try {
+                serverProcess?.exitValue()
+                false
+            } catch (_: IllegalThreadStateException) {
+                true
+            }
+
+            if (!alive) {
+                Log.w(TAG, "Server process died, restarting in 5s...")
                 updateNotification("Gateway restarting...")
                 delay(5000)
-                startNodeProcess()
+                startServer(paths)
             }
+        }
+    }
+
+    // ── Environment ────────────────────────────────────────────────────────
+
+    /**
+     * Build Termux-style environment variables (ported from codexUI).
+     */
+    private fun buildEnvironment(paths: BootstrapInstaller.Paths): Map<String, String> {
+        return mapOf(
+            "PREFIX" to paths.prefixDir,
+            "HOME" to paths.homeDir,
+            "PATH" to "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
+            "LD_LIBRARY_PATH" to "${paths.prefixDir}/lib",
+            "LD_PRELOAD" to "${paths.prefixDir}/lib/libtermux-exec.so",
+            "TERMUX_PREFIX" to paths.prefixDir,
+            "TERMUX__PREFIX" to paths.prefixDir,
+            "LANG" to "en_US.UTF-8",
+            "TMPDIR" to paths.tmpDir,
+            "TERM" to "xterm-256color",
+            "ANDROID_DATA" to "/data",
+            "ANDROID_ROOT" to "/system",
+            "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
+            "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
+            "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",
+            "SSL_CERT_DIR" to "/system/etc/security/cacerts",
+            "CURL_CA_BUNDLE" to "${paths.prefixDir}/etc/tls/cert.pem",
+            "GIT_SSL_CAINFO" to "${paths.prefixDir}/etc/tls/cert.pem",
+            "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf",
+        )
+    }
+
+    // ── Health check (used by UI) ──────────────────────────────────────────
+
+    /**
+     * Check if the gateway is reachable. Called from UI/connectors.
+     */
+    fun isGatewayOnline(): Boolean {
+        return try {
+            val conn = URL("http://127.0.0.1:$GATEWAY_PORT/health")
+                .openConnection() as HttpURLConnection
+            conn.connectTimeout = 2000
+            conn.readTimeout = 2000
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..399
+        } catch (_: Exception) {
+            false
         }
     }
 
