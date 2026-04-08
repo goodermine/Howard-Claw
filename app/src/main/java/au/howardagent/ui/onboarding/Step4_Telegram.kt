@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,6 +52,7 @@ fun ConnectStep(
         modifier = Modifier
             .fillMaxWidth()
             .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             text = "Telegram Integration",
@@ -217,7 +220,19 @@ fun ConnectStep(
             onClick = onNext,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Continue")
+            Text("Finish Setup")
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Skip button
+        androidx.compose.material3.OutlinedButton(
+            onClick = onNext,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Skip Telegram")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
