@@ -68,13 +68,14 @@ fun OnboardingScreen(
                 }
             }
 
-            // Back button (except on first step)
+            // Back button (except on first step) - compact so it doesn't
+            // eat into the step's own bottom button bar
             if (step > 0) {
                 TextButton(
                     onClick = { step-- },
-                    modifier = Modifier.padding(16.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                 ) {
-                    Text("Back")
+                    Text("← Back")
                 }
             }
         }
