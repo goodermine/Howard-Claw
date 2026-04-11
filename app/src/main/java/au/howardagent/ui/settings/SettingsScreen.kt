@@ -213,6 +213,26 @@ fun ModelsSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
                 val isDownloaded = model.id in downloadedIds
                 val isSelected = model.id == selectedId
                 val isDownloading = downloadingId == model.id
+
+                fun startDownload() {
+                    scope.launch {
+                        downloadingId = model.id
+                        downloadProgress = 0f
+                        errorText = null
+                        try {
+                            downloader.download(model).collect { p -> downloadProgress = p }
+                            downloadedIds = downloadedIds + model.id
+                            selectedId = model.id
+                            prefs.selectedModelId = model.id
+                            prefs.activeProvider = "local"
+                        } catch (e: Exception) {
+                            errorText = e.message ?: "Download failed"
+                        } finally {
+                            downloadingId = null
+                        }
+                    }
+                }
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
@@ -248,24 +268,9 @@ fun ModelsSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
                                     Icons.Default.CheckCircle, null,
                                     tint = MaterialTheme.colorScheme.primary
                                 )
-                                else -> TextButton(onClick = {
-                                    scope.launch {
-                                        downloadingId = model.id
-                                        downloadProgress = 0f
-                                        errorText = null
-                                        try {
-                                            downloader.download(model).collect { p -> downloadProgress = p }
-                                            downloadedIds = downloadedIds + model.id
-                                            selectedId = model.id
-                                            prefs.selectedModelId = model.id
-                                            prefs.activeProvider = "local"
-                                        } catch (e: Exception) {
-                                            errorText = e.message ?: "Download failed"
-                                        } finally {
-                                            downloadingId = null
-                                        }
-                                    }
-                                }) { Text("Download") }
+                                else -> TextButton(onClick = { startDownload() }) {
+                                    Text("Download")
+                                }
                             }
                         }
                         if (isDownloading) {
@@ -278,6 +283,25 @@ fun ModelsSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
                                 "${(downloadProgress * 100).toInt()}%",
                                 style = MaterialTheme.typography.labelSmall
                             )
+                        }
+                        if (isDownloaded && !isDownloading) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = {
+                                    // Delete corrupt / unwanted copy and forget selection.
+                                    downloader.delete(model)
+                                    downloadedIds = downloadedIds - model.id
+                                    if (selectedId == model.id) {
+                                        selectedId = ""
+                                        prefs.selectedModelId = ""
+                                    }
+                                }) { Text("Delete") }
+                                TextButton(onClick = {
+                                    downloader.delete(model)
+                                    downloadedIds = downloadedIds - model.id
+                                    startDownload()
+                                }) { Text("Redownload") }
+                            }
                         }
                     }
                 }

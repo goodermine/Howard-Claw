@@ -33,22 +33,38 @@ class EngineRouter(
                 val modelId = prefs.selectedModelId
                 if (modelId.isBlank()) {
                     throw IllegalStateException(
-                        "No local model selected. Open Settings → Models, or download a model in onboarding."
+                        "No local model selected. Open Settings → Models to download one, " +
+                            "or pick a cloud provider (ChatGPT / Claude)."
                     )
                 }
                 val modelInfo = ModelRegistry.getById(modelId)
                     ?: throw IllegalStateException("Selected model '$modelId' not found in registry.")
-                val file = ModelDownloader(context).modelFile(modelInfo)
+                val downloader = ModelDownloader(context)
+                val file = downloader.modelFile(modelInfo)
                 if (!file.exists()) {
                     throw IllegalStateException(
-                        "Model file missing: ${file.name}. Re-download from Settings → Models."
+                        "Model file missing: ${file.name}. Open Settings → Models to redownload."
+                    )
+                }
+                if (!downloader.isDownloaded(modelInfo)) {
+                    // File is present but corrupt (bad GGUF magic or truncated).
+                    // Delete it so the user can redownload cleanly.
+                    val size = file.length()
+                    downloader.delete(modelInfo)
+                    throw IllegalStateException(
+                        "Downloaded model appears corrupt (size=$size B). " +
+                            "Open Settings → Models and redownload."
                     )
                 }
 
                 if (!engine.isLoaded() || engine.loadedModelPath() != file.absolutePath) {
                     val ok = engine.load(file.absolutePath)
                     if (!ok) {
-                        throw IllegalStateException("Failed to load model: ${file.name}")
+                        throw IllegalStateException(
+                            "llama.cpp failed to load ${file.name} (size=${file.length()} B). " +
+                                "The file may be corrupt — try deleting and redownloading in " +
+                                "Settings → Models."
+                        )
                     }
                 }
                 engine.also { activeEngine = it }
