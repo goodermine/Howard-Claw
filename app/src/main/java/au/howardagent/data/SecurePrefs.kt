@@ -37,6 +37,10 @@ class SecurePrefs(context: Context) {
         get() = prefs.getString("active_provider", "local") ?: "local"
         set(value) = prefs.edit().putString("active_provider", value).apply()
 
+    var selectedModelId: String
+        get() = prefs.getString("selected_model_id", "") ?: ""
+        set(value) = prefs.edit().putString("selected_model_id", value).apply()
+
     // Cloud API keys
     var openaiKey: String
         get() = prefs.getString("openai_key", "") ?: ""

@@ -30,7 +30,7 @@ class InferenceService : Service() {
     private val db         = HowardApplication.instance.database
     private val downloader = ModelDownloader(HowardApplication.instance)
     private val dispatcher = CommandDispatcher(HowardApplication.instance)
-    private val router     = EngineRouter(prefs)
+    private val router     = EngineRouter(HowardApplication.instance, prefs)
 
     override fun onCreate() {
         super.onCreate()
@@ -65,8 +65,7 @@ class InferenceService : Service() {
         val buffer = StringBuilder()
 
         try {
-            val localPath = getActiveModelPath()
-            val engine    = router.getEngine(localPath)
+            val engine    = router.getEngine()
             val system    = PromptBuilder.build()
 
             engine.infer(
@@ -112,12 +111,6 @@ class InferenceService : Service() {
                 handleTask(msg.text, replyTo = msg.chatId)
             }
         }
-    }
-
-    private suspend fun getActiveModelPath(): String? {
-        val active = db.modelDao().getActiveModel() ?: return null
-        val file   = downloader.modelFile(ModelRegistry.getById(active.id) ?: return null)
-        return if (file.exists()) file.absolutePath else null
     }
 
     private fun createNotificationChannel() {

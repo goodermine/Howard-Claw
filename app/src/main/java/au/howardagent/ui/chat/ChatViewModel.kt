@@ -40,7 +40,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as HowardApplication
     private val prefs = app.securePrefs
     private val database = app.database
-    private val router = EngineRouter(prefs)
+    private val router = EngineRouter(application, prefs)
     private val dispatcher = CommandDispatcher(application)
 
     private val conversationId: String = UUID.randomUUID().toString()

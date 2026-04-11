@@ -21,6 +21,7 @@ import au.howardagent.download.ModelRegistry
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
     val context = LocalContext.current
@@ -33,6 +34,16 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
     var downloadError by remember { mutableStateOf<String?>(null) }
     var downloadedIds by remember {
         mutableStateOf(models.filter { downloader.isDownloaded(it) }.map { it.id }.toSet())
+    }
+    var selectedId by remember { mutableStateOf(prefs.selectedModelId) }
+
+    // If a model is already downloaded but no selection is set, default to the first one.
+    LaunchedEffect(downloadedIds) {
+        if (selectedId.isBlank() && downloadedIds.isNotEmpty()) {
+            val firstDownloaded = downloadedIds.first()
+            selectedId = firstDownloaded
+            prefs.selectedModelId = firstDownloaded
+        }
     }
 
     Column(
@@ -69,6 +80,7 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
                 ModelCard(
                     model = model,
                     isDownloaded = model.id in downloadedIds,
+                    isSelected = model.id == selectedId,
                     isDownloading = downloadingId == model.id,
                     progress = if (downloadingId == model.id) downloadProgress else 0f,
                     error = if (downloadError != null && downloadingId == null) downloadError else null,
@@ -82,12 +94,19 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
                                     downloadProgress = progress
                                 }
                                 downloadedIds = downloadedIds + model.id
+                                // Auto-select the freshly downloaded model so chat can use it.
+                                selectedId = model.id
+                                prefs.selectedModelId = model.id
                             } catch (e: Exception) {
                                 downloadError = e.message ?: "Download failed"
                             } finally {
                                 downloadingId = null
                             }
                         }
+                    },
+                    onSelect = {
+                        selectedId = model.id
+                        prefs.selectedModelId = model.id
                     }
                 )
             }
@@ -104,16 +123,26 @@ fun Step1_ModelDownload(prefs: SecurePrefs, onNext: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelCard(
     model: ModelInfo,
     isDownloaded: Boolean,
+    isSelected: Boolean,
     isDownloading: Boolean,
     progress: Float,
     error: String? = null,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onSelect: () -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = { if (isDownloaded) onSelect() },
+        colors = if (isSelected)
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        else
+            CardDefaults.cardColors()
+    ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -121,7 +150,7 @@ private fun ModelCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = model.name,
+                        text = model.name + if (isSelected) "  (active)" else "",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )

@@ -12,6 +12,7 @@ class LocalEngine : InferenceEngine {
     }
 
     private var modelLoaded = false
+    private var loadedPath: String? = null
 
     // JNI methods
     external fun loadModel(modelPath: String, nThreads: Int, nCtx: Int): Boolean
@@ -25,9 +26,19 @@ class LocalEngine : InferenceEngine {
         fun onError(error: String)
     }
 
+    fun isLoaded(): Boolean = modelLoaded
+    fun loadedModelPath(): String? = loadedPath
+
     fun load(modelPath: String, threads: Int = 4, contextSize: Int = 2048): Boolean {
+        if (modelLoaded && loadedPath == modelPath) return true
+        if (modelLoaded) {
+            freeModel()
+            modelLoaded = false
+            loadedPath = null
+        }
         modelLoaded = loadModel(modelPath, threads, contextSize)
-        Log.i(TAG, "Model loaded: $modelLoaded")
+        loadedPath = if (modelLoaded) modelPath else null
+        Log.i(TAG, "Model loaded: $modelLoaded ($modelPath)")
         return modelLoaded
     }
 
@@ -57,5 +68,6 @@ class LocalEngine : InferenceEngine {
     override fun release() {
         freeModel()
         modelLoaded = false
+        loadedPath = null
     }
 }

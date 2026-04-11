@@ -32,6 +32,7 @@ fun OnboardingScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
         ) {
             // Progress indicator
             LinearProgressIndicator(

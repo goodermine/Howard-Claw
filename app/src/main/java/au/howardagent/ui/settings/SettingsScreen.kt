@@ -17,7 +17,16 @@ import androidx.compose.ui.unit.dp
 import au.howardagent.HowardApplication
 import au.howardagent.BuildConfig
 import au.howardagent.connectors.OpenClawConnector
+import au.howardagent.data.SecurePrefs
 import au.howardagent.download.DeviceDetector
+import au.howardagent.download.ModelDownloader
+import au.howardagent.download.ModelInfo
+import au.howardagent.download.ModelRegistry
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.items
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -33,9 +42,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 
     when (subScreen) {
-        "models"   -> StubScreen("Models") { subScreen = null }
-        "apikeys"  -> StubScreen("API Keys") { subScreen = null }
-        "telegram" -> StubScreen("Telegram Settings") { subScreen = null }
+        "models"   -> ModelsSubscreen(prefs) { subScreen = null }
+        "apikeys"  -> ApiKeysSubscreen(prefs) { subScreen = null }
+        "telegram" -> TelegramSubscreen(prefs) { subScreen = null }
         else -> Scaffold(
             topBar = {
                 TopAppBar(
@@ -154,23 +163,276 @@ fun InfoRow(label: String, value: String) {
     }
 }
 
+/* ── Models subscreen ──────────────────────────────────────────────── */
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StubScreen(title: String, onBack: () -> Unit) {
+fun ModelsSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val downloader = remember { ModelDownloader(context) }
+    val device = remember { DeviceDetector.profile(context) }
+    val models = remember { ModelRegistry.forDevice(device.ramGb) }
+
+    var downloadedIds by remember {
+        mutableStateOf(models.filter { downloader.isDownloaded(it) }.map { it.id }.toSet())
+    }
+    var selectedId by remember { mutableStateOf(prefs.selectedModelId) }
+    var downloadingId by remember { mutableStateOf<String?>(null) }
+    var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(title, fontWeight = FontWeight.Bold) },
+                title = { Text("Models", fontWeight = FontWeight.Bold) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
             )
         }
     ) { padding ->
-        Box(
+        LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
-            contentAlignment = Alignment.Center
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text("Coming soon", style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            item {
+                Text(
+                    "Tap a downloaded model to make it the active local model. " +
+                        "The active model is used whenever you select \"Local GGUF\" in chat.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            errorText?.let {
+                item {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+            items(models, key = { it.id }) { model ->
+                val isDownloaded = model.id in downloadedIds
+                val isSelected = model.id == selectedId
+                val isDownloading = downloadingId == model.id
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        if (isDownloaded) {
+                            selectedId = model.id
+                            prefs.selectedModelId = model.id
+                            prefs.activeProvider = "local"
+                        }
+                    },
+                    colors = if (isSelected)
+                        CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                    else CardDefaults.cardColors()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    model.name + if (isSelected) "  (active)" else "",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "${model.parameterSize} · ${model.category} · ${model.fileSizeMb} MB",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            when {
+                                isDownloading -> CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp), strokeWidth = 2.dp
+                                )
+                                isDownloaded -> Icon(
+                                    Icons.Default.CheckCircle, null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                else -> TextButton(onClick = {
+                                    scope.launch {
+                                        downloadingId = model.id
+                                        downloadProgress = 0f
+                                        errorText = null
+                                        try {
+                                            downloader.download(model).collect { p -> downloadProgress = p }
+                                            downloadedIds = downloadedIds + model.id
+                                            selectedId = model.id
+                                            prefs.selectedModelId = model.id
+                                            prefs.activeProvider = "local"
+                                        } catch (e: Exception) {
+                                            errorText = e.message ?: "Download failed"
+                                        } finally {
+                                            downloadingId = null
+                                        }
+                                    }
+                                }) { Text("Download") }
+                            }
+                        }
+                        if (isDownloading) {
+                            Spacer(Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { downloadProgress },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                "${(downloadProgress * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ── API Keys subscreen ────────────────────────────────────────────── */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ApiKeysSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
+    var openai by remember { mutableStateOf(prefs.openaiKey) }
+    var anthropic by remember { mutableStateOf(prefs.anthropicKey) }
+    var gemini by remember { mutableStateOf(prefs.geminiKey) }
+    var openrouter by remember { mutableStateOf(prefs.openrouterKey) }
+    var ollama by remember { mutableStateOf(prefs.ollamaBaseUrl) }
+    var github by remember { mutableStateOf(prefs.githubToken) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("API Keys", fontWeight = FontWeight.Bold) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "Keys are stored in EncryptedSharedPreferences on this device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = openai,
+                onValueChange = { openai = it; prefs.openaiKey = it },
+                label = { Text("OpenAI (ChatGPT)") },
+                placeholder = { Text("sk-...") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = anthropic,
+                onValueChange = { anthropic = it; prefs.anthropicKey = it },
+                label = { Text("Anthropic (Claude)") },
+                placeholder = { Text("sk-ant-...") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = gemini,
+                onValueChange = { gemini = it; prefs.geminiKey = it },
+                label = { Text("Google Gemini") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = openrouter,
+                onValueChange = { openrouter = it; prefs.openrouterKey = it },
+                label = { Text("OpenRouter") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = ollama,
+                onValueChange = { ollama = it; prefs.ollamaBaseUrl = it },
+                label = { Text("Ollama base URL") },
+                placeholder = { Text("http://192.168.1.10:11434/v1") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = github,
+                onValueChange = { github = it; prefs.githubToken = it },
+                label = { Text("GitHub token (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+        }
+    }
+}
+
+/* ── Telegram subscreen ────────────────────────────────────────────── */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TelegramSubscreen(prefs: SecurePrefs, onBack: () -> Unit) {
+    var botToken by remember { mutableStateOf(prefs.telegramBotToken) }
+    var channelId by remember { mutableStateOf(prefs.telegramChannelId) }
+    var enabled by remember { mutableStateOf(prefs.telegramEnabled) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Telegram", fontWeight = FontWeight.Bold) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Back") } }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "Connect Howard to a Telegram bot for remote control and notifications.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = botToken,
+                onValueChange = { botToken = it; prefs.telegramBotToken = it },
+                label = { Text("Bot Token") },
+                placeholder = { Text("123456789:ABCdef...") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = channelId,
+                onValueChange = { channelId = it; prefs.telegramChannelId = it },
+                label = { Text("Channel ID") },
+                placeholder = { Text("@your_channel or -100123...") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Enable inbound polling",
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text("Receive commands sent to the bot",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = { enabled = it; prefs.telegramEnabled = it }
+                )
+            }
         }
     }
 }
