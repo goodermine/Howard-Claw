@@ -8,74 +8,45 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import au.howardagent.R
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * Foreground service that manages the OpenClaw gateway.
- *
- * Architecture (ported from codexUI/AnyClaw):
- * - Uses BootstrapInstaller to extract Termux environment
- * - Installs Node.js via Termux apt-get (downloaded .deb packages)
- * - Runs OpenClaw as a Node.js subprocess via ProcessBuilder
- * - Sets LD_PRELOAD=libtermux-exec.so for proper exec() behavior
- *
- * Requires targetSdk <= 28 to allow executing binaries from app data dirs.
- */
 class GatewayService : Service() {
 
     companion object {
-        const val TAG          = "GatewayService"
-        const val CHANNEL_ID   = "howard_gateway"
-        const val NOTIF_ID     = 1001
-        const val GATEWAY_PORT = 18789
+        const val TAG             = "GatewayService"
+        const val CHANNEL_ID      = "howard_gateway"
+        const val NOTIF_ID        = 1001
+        const val GATEWAY_PORT    = 18789
+
+        const val ACTION_START    = "au.howardagent.GATEWAY_START"
+        const val ACTION_STOP     = "au.howardagent.GATEWAY_STOP"
+
+        private val _status = MutableStateFlow("stopped")
+        val status: StateFlow<String> = _status.asStateFlow()
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var serverProcess: Process? = null
+    private var startupJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification("Starting OpenClaw gateway..."))
-
-        scope.launch {
-            try {
-                // Step 1: Extract Termux bootstrap
-                if (!BootstrapInstaller.isBootstrapInstalled(this@GatewayService)) {
-                    updateNotification("Extracting runtime environment...")
-                    BootstrapInstaller.install(this@GatewayService) { msg ->
-                        updateNotification(msg)
-                    }
-                }
-
-                // Step 2: Install Node.js if needed
-                val paths = BootstrapInstaller.getPaths(this@GatewayService)
-                if (!isNodeInstalled(paths)) {
-                    updateNotification("Installing Node.js...")
-                    installNode(paths) { msg -> updateNotification(msg) }
-                }
-
-                // Step 3: Extract OpenClaw if needed
-                if (!isOpenClawInstalled(paths)) {
-                    updateNotification("Installing OpenClaw...")
-                    extractOpenClaw(paths) { msg -> updateNotification(msg) }
-                }
-
-                // Step 4: Start the server
-                startServer(paths)
-                monitorServer(paths)
-            } catch (e: Exception) {
-                Log.e(TAG, "Gateway startup failed: ${e.message}", e)
-                updateNotification("Gateway error: ${e.message}")
-            }
-        }
+        startForeground(NOTIF_ID, buildNotification("OpenClaw gateway idle"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_STOP -> stopGateway()
+            else -> startGateway()
+        }
         return START_STICKY
     }
 
@@ -84,14 +55,82 @@ class GatewayService : Service() {
     override fun onDestroy() {
         serverProcess?.destroyForcibly()
         scope.cancel()
+        setStatus("stopped")
         super.onDestroy()
+    }
+
+    // ── Start / stop ──────────────────────────────────────────────────────
+
+    private fun startGateway() {
+        if (startupJob?.isActive == true) return
+
+        scope.cancel()
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        startupJob = scope.launch {
+            try {
+                setStatus("extracting_bootstrap")
+                if (!BootstrapInstaller.isBootstrapInstalled(this@GatewayService)) {
+                    updateNotification("Extracting runtime environment...")
+                    BootstrapInstaller.install(this@GatewayService) { msg ->
+                        updateNotification(msg)
+                    }
+                }
+
+                setStatus("installing_node")
+                val paths = BootstrapInstaller.getPaths(this@GatewayService)
+                if (!isNodeInstalled(paths)) {
+                    updateNotification("Installing Node.js...")
+                    installNode(paths) { msg -> updateNotification(msg) }
+                }
+
+                setStatus("installing_openclaw")
+                if (!isOpenClawInstalled(paths)) {
+                    updateNotification("Installing OpenClaw...")
+                    extractOpenClaw(paths) { msg -> updateNotification(msg) }
+                }
+
+                setStatus("starting_server")
+                startServer(paths)
+
+                delay(3000)
+                if (isGatewayOnline()) {
+                    setStatus("online")
+                    updateNotification("Howard online — port $GATEWAY_PORT")
+                } else {
+                    setStatus("error: server started but /health not reachable")
+                    updateNotification("Gateway started but health check failed")
+                }
+
+                monitorServer(paths)
+            } catch (e: Exception) {
+                Log.e(TAG, "Gateway startup failed: ${e.message}", e)
+                val msg = e.message ?: "Unknown error"
+                setStatus("error: $msg")
+                updateNotification("Gateway error: $msg")
+            }
+        }
+    }
+
+    private fun stopGateway() {
+        startupJob?.cancel()
+        startupJob = null
+        serverProcess?.destroyForcibly()
+        serverProcess = null
+        scope.cancel()
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        setStatus("stopped")
+        updateNotification("OpenClaw gateway stopped")
+    }
+
+    // ── Status broadcast ──────────────────────────────────────────────────
+
+    private fun setStatus(value: String) {
+        _status.value = value
     }
 
     // ── Shell helpers (from codexUI) ───────────────────────────────────────
 
-    /**
-     * Run a shell command inside the Termux prefix environment.
-     */
     private fun runInPrefix(
         paths: BootstrapInstaller.Paths,
         command: String,
@@ -129,10 +168,6 @@ class GatewayService : Service() {
 
     // ── Node.js installation (from codexUI pattern) ────────────────────────
 
-    /**
-     * Install Node.js from Termux packages using apt-get download + dpkg-deb extract.
-     * This avoids needing proot for basic Node.js installation.
-     */
     private fun installNode(
         paths: BootstrapInstaller.Paths,
         onProgress: (String) -> Unit,
@@ -140,13 +175,11 @@ class GatewayService : Service() {
         val prefix = paths.prefixDir
         val termuxPrefix = "/data/data/com.termux/files/usr"
 
-        // First try to extract from bundled asset (node-supplement.tar.gz)
         if (extractNodeSupplement(paths)) {
             onProgress("Node.js extracted from bundle")
             return
         }
 
-        // Fall back to apt-get download
         onProgress("Downloading Node.js packages…")
         val downloadCmd = """
             cd $prefix/tmp &&
@@ -178,7 +211,6 @@ class GatewayService : Service() {
             Log.e(TAG, "dpkg-deb extract failed with code $extractCode")
         }
 
-        // Fix script shebangs and create wrapper scripts
         onProgress("Fixing script paths…")
         val appDataDir = filesDir.parentFile?.absolutePath ?: "/data/user/0/au.howardagent"
         val fixCmd = """
@@ -204,9 +236,6 @@ WEOF
         Log.i(TAG, "Node.js installed successfully")
     }
 
-    /**
-     * Try to extract node-supplement.tar.gz from bundled assets.
-     */
     private fun extractNodeSupplement(paths: BootstrapInstaller.Paths): Boolean {
         try {
             assets.open("node-supplement.tar.gz").use { /* exists check */ }
@@ -244,20 +273,15 @@ WEOF
 
     // ── OpenClaw installation ──────────────────────────────────────────────
 
-    /**
-     * Extract OpenClaw from bundled asset or install via npm.
-     */
     private fun extractOpenClaw(
         paths: BootstrapInstaller.Paths,
         onProgress: (String) -> Unit,
     ) {
-        // Try bundled asset first
         if (extractOpenClawFromAsset(paths)) {
             onProgress("OpenClaw extracted from bundle")
             return
         }
 
-        // Fall back to npm install
         if (!isNodeInstalled(paths)) {
             throw RuntimeException("Node.js required to install OpenClaw via npm")
         }
@@ -321,30 +345,20 @@ WEOF
         val openclawDir = File(paths.prefixDir, "lib/node_modules/openclaw")
 
         if (!nodeBin.exists()) {
-            Log.e(TAG, "Node binary not found at ${nodeBin.absolutePath}")
-            updateNotification("Error: Node.js not installed")
-            return
+            throw RuntimeException("Node binary not found at ${nodeBin.absolutePath}")
         }
 
         if (!openclawDir.exists()) {
-            Log.e(TAG, "OpenClaw not found at ${openclawDir.absolutePath}")
-            updateNotification("Error: OpenClaw not installed")
-            return
+            throw RuntimeException("OpenClaw not found at ${openclawDir.absolutePath}")
         }
 
-        // Find the entry point
         val entryPoint = when {
             File(openclawDir, "dist/index.js").exists() -> File(openclawDir, "dist/index.js").absolutePath
             File(openclawDir, "openclaw.mjs").exists() -> File(openclawDir, "openclaw.mjs").absolutePath
             File(openclawDir, "index.js").exists() -> File(openclawDir, "index.js").absolutePath
-            else -> {
-                Log.e(TAG, "No OpenClaw entry point found")
-                updateNotification("Error: OpenClaw entry point not found")
-                return
-            }
+            else -> throw RuntimeException("No OpenClaw entry point found in ${openclawDir.absolutePath}")
         }
 
-        // Create OpenClaw config
         val configDir = File(paths.homeDir, ".openclaw").also { it.mkdirs() }
         val configFile = File(configDir, "openclaw.json")
         if (!configFile.exists()) {
@@ -372,7 +386,6 @@ WEOF
 
         serverProcess = pb.start()
 
-        // Stream stdout to logcat
         scope.launch {
             try {
                 val reader = BufferedReader(InputStreamReader(serverProcess!!.inputStream))
@@ -383,8 +396,6 @@ WEOF
                 }
             } catch (_: Exception) {}
         }
-
-        updateNotification("Howard online — port $GATEWAY_PORT")
     }
 
     private suspend fun monitorServer(paths: BootstrapInstaller.Paths) {
@@ -400,18 +411,28 @@ WEOF
 
             if (!alive) {
                 Log.w(TAG, "Server process died, restarting in 5s...")
+                setStatus("restarting")
                 updateNotification("Gateway restarting...")
                 delay(5000)
-                startServer(paths)
+                try {
+                    startServer(paths)
+                    delay(3000)
+                    if (isGatewayOnline()) {
+                        setStatus("online")
+                        updateNotification("Howard online — port $GATEWAY_PORT")
+                    } else {
+                        setStatus("error: process restarted but /health unreachable")
+                    }
+                } catch (e: Exception) {
+                    setStatus("error: restart failed — ${e.message}")
+                    updateNotification("Gateway error: ${e.message}")
+                }
             }
         }
     }
 
     // ── Environment ────────────────────────────────────────────────────────
 
-    /**
-     * Build Termux-style environment variables (ported from codexUI).
-     */
     private fun buildEnvironment(paths: BootstrapInstaller.Paths): Map<String, String> {
         return mapOf(
             "PREFIX" to paths.prefixDir,
@@ -436,11 +457,8 @@ WEOF
         )
     }
 
-    // ── Health check (used by UI) ──────────────────────────────────────────
+    // ── Health check ──────────────────────────────────────────────────────
 
-    /**
-     * Check if the gateway is reachable. Called from UI/connectors.
-     */
     fun isGatewayOnline(): Boolean {
         return try {
             val conn = URL("http://127.0.0.1:$GATEWAY_PORT/health")

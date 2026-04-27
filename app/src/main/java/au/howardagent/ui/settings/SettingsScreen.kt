@@ -22,10 +22,14 @@ import au.howardagent.download.DeviceDetector
 import au.howardagent.download.ModelDownloader
 import au.howardagent.download.ModelInfo
 import au.howardagent.download.ModelRegistry
+import au.howardagent.service.GatewayService
+import android.content.Intent
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,9 +40,15 @@ fun SettingsScreen(onBack: () -> Unit) {
     val device  = remember { DeviceDetector.profile(context) }
     var subScreen by remember { mutableStateOf<String?>(null) }
     var gatewayOnline by remember { mutableStateOf(false) }
+    val gatewayDetail by GatewayService.status.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val connector = remember { OpenClawConnector() }
 
     LaunchedEffect(Unit) {
-        gatewayOnline = OpenClawConnector().isOnline()
+        while (true) {
+            gatewayOnline = connector.isOnline()
+            delay(5_000)
+        }
     }
 
     when (subScreen) {
@@ -74,29 +84,98 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 item {
+                    val isStarting = gatewayDetail.startsWith("extracting")
+                            || gatewayDetail.startsWith("installing")
+                            || gatewayDetail == "starting_server"
+                            || gatewayDetail == "restarting"
+                    val isStopped = gatewayDetail == "stopped"
+                    val hasError = gatewayDetail.startsWith("error")
+
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
-                            containerColor = if (gatewayOnline)
-                                MaterialTheme.colorScheme.surfaceVariant
-                            else
-                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                            containerColor = when {
+                                gatewayOnline -> MaterialTheme.colorScheme.surfaceVariant
+                                hasError -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            }
                         )
                     ) {
-                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                if (gatewayOnline) Icons.Default.CheckCircle else Icons.Default.Warning,
-                                null,
-                                tint = if (gatewayOnline) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text("OpenClaw Gateway", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                Text(
-                                    if (gatewayOnline) "Online - ws://127.0.0.1:18789" else "Offline",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                when {
+                                    isStarting -> CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp), strokeWidth = 2.dp
+                                    )
+                                    gatewayOnline -> Icon(
+                                        Icons.Default.CheckCircle, null,
+                                        tint = Color(0xFF2E7D32)
+                                    )
+                                    else -> Icon(
+                                        Icons.Default.Warning, null,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "OpenClaw Gateway",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        when {
+                                            gatewayOnline -> "Online — port ${GatewayService.GATEWAY_PORT}"
+                                            isStarting -> gatewayDetail.replace("_", " ")
+                                                .replaceFirstChar { it.uppercaseChar() } + "..."
+                                            hasError -> gatewayDetail.removePrefix("error: ")
+                                            else -> "Offline"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            Spacer(Modifier.height(12.dp))
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (gatewayOnline || isStarting) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            context.stopService(
+                                                Intent(context, GatewayService::class.java)
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) { Text("Stop") }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            context.startForegroundService(
+                                                Intent(context, GatewayService::class.java)
+                                                    .apply { action = GatewayService.ACTION_START }
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    ) { Text("Start Gateway") }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        context.stopService(
+                                            Intent(context, GatewayService::class.java)
+                                        )
+                                        scope.launch {
+                                            delay(1_500)
+                                            context.startForegroundService(
+                                                Intent(context, GatewayService::class.java)
+                                                    .apply { action = GatewayService.ACTION_START }
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Restart") }
                             }
                         }
                     }
