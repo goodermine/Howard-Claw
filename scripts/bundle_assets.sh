@@ -3,17 +3,29 @@
 # Howard — Asset Bundling Script
 # Run on a Linux machine before building the APK with OpenClaw support.
 #
-# Based on the codexUI/AnyClaw architecture:
+# Based on the openclaw-android glibc dynamic linker architecture:
 #   1. Downloads the Termux bootstrap (provides bin/sh, libtermux-exec.so, etc.)
-#   2. Downloads Node.js LTS from Termux packages
-#   3. Packs OpenClaw npm package
+#   2. Downloads glibc libraries (provides ld-linux-aarch64.so.1)
+#   3. Downloads standard linux-arm64 Node.js from nodejs.org
+#   4. Packs OpenClaw npm package
 #
 # Output layout:
 #   assets/bootstrap-aarch64.zip   — Termux Linux environment (~30MB)
+#   assets/glibc-libs.tar.gz       — glibc dynamic linker + runtime libs (~10MB)
+#   assets/node-supplement.tar.gz  — Node.js linux-arm64 (bin/node.real + npm)
 #   assets/openclaw.tar.gz         — OpenClaw npm package
+#   assets/glibc-compat.js         — Android kernel quirk fixes (copied separately)
 #
-# At runtime, GatewayService extracts the bootstrap into filesDir/usr/,
-# then runs Node.js via ProcessBuilder with Termux-style environment variables.
+# At runtime, GatewayService:
+#   1. Extracts bootstrap into filesDir/usr/
+#   2. Extracts glibc libs into filesDir/usr/glibc/lib/
+#   3. Extracts Node.js into filesDir/home/.openclaw-android/node/
+#   4. Executes node via: ld-linux-aarch64.so.1 --library-path $PREFIX/glibc/lib node.real
+#
+# This avoids running Termux-compiled (Bionic) Node.js directly, which fails
+# due to SELinux and dynamic linker mismatches. Instead, standard linux-arm64
+# binaries are loaded through the glibc dynamic linker — the proven approach
+# from openclaw-android (1.8k+ stars).
 #
 # IMPORTANT: This approach requires targetSdk <= 28 in build.gradle.kts
 # to allow executing binaries from app data directories.
@@ -28,13 +40,14 @@ cd "$PROJECT_ROOT"
 ASSETS_DIR="app/src/main/assets"
 WORK_DIR="/tmp/howard-bundle-$$"
 
-# ── Termux bootstrap release ────────────────────────────────────────────────
-# Get the latest bootstrap from: https://github.com/termux/termux-packages/releases
-# Look for bootstrap-aarch64.zip
-BOOTSTRAP_URL="https://github.com/termux/termux-packages/releases/download/bootstrap-2025.01.19-r1%2Bapt-android-7/bootstrap-aarch64.zip"
+# ── Pinned versions ────────────────────────────────────────────────────────
+# These match openclaw-android's verified pair. Bump together, never one alone.
+NODE_VERSION="24.21.0"
+GLIBC_PKG_URL="https://sync.termux-pacman.dev/gpkg/aarch64/glibc-2.44-0-aarch64.pkg.tar.xz"
+BOOTSTRAP_URL="https://github.com/termux/termux-packages/releases/download/bootstrap-2026.02.12-r1%2Bapt.android-7/bootstrap-aarch64.zip"
 
 echo "═══════════════════════════════════════════════"
-echo "  HOWARD — Bundling Assets (Termux Bootstrap)"
+echo "  HOWARD — Bundling Assets (glibc approach)"
 echo "═══════════════════════════════════════════════"
 
 mkdir -p "$ASSETS_DIR" "$WORK_DIR"
@@ -42,7 +55,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 # ── 1. Download Termux bootstrap ────────────────────────────────────────────
 echo ""
-echo "[1/3] Downloading Termux bootstrap (aarch64)..."
+echo "[1/4] Downloading Termux bootstrap (aarch64)..."
 
 if [ -f "$ASSETS_DIR/bootstrap-aarch64.zip" ]; then
     echo "    Already exists, skipping download."
@@ -51,114 +64,120 @@ else
 fi
 echo "    Bootstrap: $(ls -lh "$ASSETS_DIR/bootstrap-aarch64.zip" | awk '{print $5}')"
 
-# ── 2. Download Node.js from Termux and repack into bootstrap ───────────────
+# ── 2. Download glibc runtime libraries ─────────────────────────────────────
 echo ""
-echo "[2/3] Downloading Node.js LTS (Termux aarch64)..."
+echo "[2/4] Downloading glibc runtime (aarch64)..."
 
-# We need to add Node.js to the bootstrap since it's not included by default.
-# Download the .deb and extract the node binary + npm into a supplementary zip.
-TERMUX_REPO="https://packages.termux.dev/apt/termux-main/pool/main"
-TERMUX_INDEX="https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages"
-
-mkdir -p "$WORK_DIR/node-extract"
-
-# Discover the current filename for nodejs-lts (preferred) or nodejs by parsing
-# the Packages index. Termux bumps version numbers constantly, so hard-coding
-# the .deb name is fragile.
-resolve_latest_deb() {
-    local pkg="$1"
-    curl -fsSL "$TERMUX_INDEX" 2>/dev/null \
-        | awk -v p="$pkg" '
-            /^Package: / { current = $2 }
-            /^Filename: / && current == p { print $2; exit }
-        '
-}
-
-NODE_DEB_PATH=""
-for candidate in nodejs-lts nodejs; do
-    NODE_DEB_PATH="$(resolve_latest_deb "$candidate" || true)"
-    if [ -n "$NODE_DEB_PATH" ]; then
-        echo "    Resolved $candidate → $NODE_DEB_PATH"
-        break
-    fi
-done
-
-if [ -z "$NODE_DEB_PATH" ]; then
-    echo "    WARNING: could not resolve Node.js package from Termux index."
-    echo "    Falling back to a known filename (may 404)."
-    NODE_DEB_PATH="pool/main/n/nodejs/nodejs_22.12.0_aarch64.deb"
-fi
-
-NODE_URL="https://packages.termux.dev/apt/termux-main/$NODE_DEB_PATH"
-curl -fL -o "$WORK_DIR/node.deb" "$NODE_URL" || {
-    echo "    ERROR: failed to download Node.js from $NODE_URL"
-    echo "    Skipping node bundle — GatewayService will attempt runtime install."
-}
-
-if [ -f "$WORK_DIR/node.deb" ]; then
-    (cd "$WORK_DIR/node-extract" && ar x ../node.deb && tar xf data.tar.* 2>/dev/null) || true
-fi
-
-# Create a node supplement zip that will be extracted alongside the bootstrap
-# The deb extracts to data/data/com.termux/files/usr/ — we need just the usr/ contents
-NODE_USR=$(find "$WORK_DIR/node-extract" -type d -name "usr" -path "*/com.termux/*" | head -1)
-if [ -z "$NODE_USR" ]; then
-    # Some debs have different path structure
-    NODE_USR=$(find "$WORK_DIR/node-extract" -type d -name "usr" | head -1)
-fi
-
-if [ -n "$NODE_USR" ] && [ -f "$NODE_USR/bin/node" ]; then
-    # Also pull in the runtime libraries nodejs depends on so a cold install
-    # doesn't need network access. Termux's nodejs depends on c-ares, libicu
-    # and libsqlite — we fetch and merge them into the same staging tree.
-    for dep in c-ares libicu libsqlite; do
-        DEP_PATH="$(resolve_latest_deb "$dep" || true)"
-        if [ -n "$DEP_PATH" ]; then
-            echo "    + bundling dep: $DEP_PATH"
-            curl -fsSL -o "$WORK_DIR/$dep.deb" \
-                "https://packages.termux.dev/apt/termux-main/$DEP_PATH" || continue
-            mkdir -p "$WORK_DIR/$dep-extract"
-            (cd "$WORK_DIR/$dep-extract" && ar x "../$dep.deb" && tar xf data.tar.* 2>/dev/null) || true
-            DEP_USR=$(find "$WORK_DIR/$dep-extract" -type d -name "usr" -path "*/com.termux/*" | head -1)
-            [ -z "$DEP_USR" ] && DEP_USR=$(find "$WORK_DIR/$dep-extract" -type d -name "usr" | head -1)
-            if [ -n "$DEP_USR" ]; then
-                cp -a "$DEP_USR"/* "$NODE_USR/" 2>/dev/null || true
-            fi
-        fi
-    done
-
-    # Create a tar.gz of the node install that GatewayService can extract over the bootstrap
-    tar -czf "$ASSETS_DIR/node-supplement.tar.gz" -C "$NODE_USR" .
-    echo "    Node supplement: $(ls -lh "$ASSETS_DIR/node-supplement.tar.gz" | awk '{print $5}')"
-    echo "    Node binary: $(file "$NODE_USR/bin/node" 2>/dev/null | grep -o 'ELF.*' | head -c 80 || echo '(file tool unavailable)')"
+if [ -f "$ASSETS_DIR/glibc-libs.tar.gz" ]; then
+    echo "    Already exists, skipping download."
 else
-    echo "    WARNING: Could not find node binary in Termux .deb"
-    echo "    Node.js will need to be installed manually via Termux apt"
+    echo "    Downloading glibc package from Termux pacman repo..."
+    curl -fL -o "$WORK_DIR/glibc.pkg.tar.xz" "$GLIBC_PKG_URL"
+    echo "    Package: $(ls -lh "$WORK_DIR/glibc.pkg.tar.xz" | awk '{print $5}')"
+
+    echo "    Extracting glibc libraries..."
+    mkdir -p "$WORK_DIR/glibc-extract"
+    tar xJf "$WORK_DIR/glibc.pkg.tar.xz" -C "$WORK_DIR/glibc-extract"
+
+    # The pacman package extracts to data/data/com.termux/files/usr/glibc/
+    GLIBC_ROOT=$(find "$WORK_DIR/glibc-extract" -type d -name "glibc" -path "*/com.termux/*" | head -1)
+    if [ -z "$GLIBC_ROOT" ]; then
+        GLIBC_ROOT=$(find "$WORK_DIR/glibc-extract" -type d -name "glibc" | head -1)
+    fi
+
+    if [ -z "$GLIBC_ROOT" ] || [ ! -d "$GLIBC_ROOT/lib" ]; then
+        echo "    ERROR: Could not find glibc/lib/ in the package."
+        echo "    Contents of extract dir:"
+        find "$WORK_DIR/glibc-extract" -maxdepth 5 -type d | head -20
+        exit 1
+    fi
+
+    # Verify the dynamic linker exists
+    if [ ! -f "$GLIBC_ROOT/lib/ld-linux-aarch64.so.1" ]; then
+        echo "    ERROR: ld-linux-aarch64.so.1 not found in glibc package"
+        exit 1
+    fi
+
+    # Bundle the glibc directory (preserving glibc/lib/ structure)
+    tar -czf "$ASSETS_DIR/glibc-libs.tar.gz" -C "$(dirname "$GLIBC_ROOT")" glibc
+    echo "    glibc libs: $(ls -lh "$ASSETS_DIR/glibc-libs.tar.gz" | awk '{print $5}')"
+    echo "    ld.so: $(file "$GLIBC_ROOT/lib/ld-linux-aarch64.so.1" 2>/dev/null | grep -o 'ELF.*' | head -c 80 || echo '(file tool unavailable)')"
+
+    # List key libraries bundled
+    echo "    Libraries:"
+    ls "$GLIBC_ROOT/lib/"*.so* 2>/dev/null | while read -r f; do
+        echo "      $(basename "$f")"
+    done | sort -u | head -20
 fi
 
-# ── 3. Pack OpenClaw as tar.gz ───────────────────────────────────────────────
+# ── 3. Download Node.js (standard linux-arm64 from nodejs.org) ──────────────
 echo ""
-echo "[3/3] Packing OpenClaw npm package..."
+echo "[3/4] Downloading Node.js v${NODE_VERSION} (linux-arm64)..."
 
-npm install -g openclaw@latest --prefix "$WORK_DIR/openclaw_install" 2>/dev/null || {
-    echo "    WARNING: openclaw npm package not found or install failed."
-    echo "    Creating empty placeholder."
-    mkdir -p "$WORK_DIR/openclaw_install/lib/node_modules/openclaw"
-    echo '{"name":"openclaw","version":"0.0.0","main":"index.js"}' > \
-        "$WORK_DIR/openclaw_install/lib/node_modules/openclaw/package.json"
-    echo 'console.log("OpenClaw placeholder");' > \
-        "$WORK_DIR/openclaw_install/lib/node_modules/openclaw/index.js"
-}
+NODE_DIST_BASE="https://nodejs.org/dist/v${NODE_VERSION}"
+NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.xz"
 
-mkdir -p "$WORK_DIR/openclaw_bundle"
-cp -r "$WORK_DIR/openclaw_install/lib/node_modules/openclaw" "$WORK_DIR/openclaw_bundle/openclaw"
+if [ -f "$ASSETS_DIR/node-supplement.tar.gz" ]; then
+    echo "    Already exists, skipping download."
+else
+    echo "    Downloading from nodejs.org..."
+    curl -fL --max-time 300 -o "$WORK_DIR/$NODE_TARBALL" "$NODE_DIST_BASE/$NODE_TARBALL"
 
-cd "$WORK_DIR/openclaw_bundle/openclaw"
-npm prune --omit=dev 2>/dev/null || true
-cd - > /dev/null
+    # Verify SHA-256 checksum
+    echo "    Verifying checksum..."
+    curl -fsSL --max-time 60 -o "$WORK_DIR/SHASUMS256.txt" "$NODE_DIST_BASE/SHASUMS256.txt"
+    EXPECTED_SHA=$(awk -v f="$NODE_TARBALL" '$2 == f { print $1; exit }' "$WORK_DIR/SHASUMS256.txt")
+    ACTUAL_SHA=$(sha256sum "$WORK_DIR/$NODE_TARBALL" | awk '{ print $1 }')
 
-tar -czf "$ASSETS_DIR/openclaw.tar.gz" -C "$WORK_DIR/openclaw_bundle" openclaw
-echo "    OpenClaw bundle: $(ls -lh "$ASSETS_DIR/openclaw.tar.gz" | awk '{print $5}')"
+    if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+        echo "    ERROR: Checksum mismatch for $NODE_TARBALL"
+        echo "      expected: ${EXPECTED_SHA:-<not listed>}"
+        echo "      actual:   $ACTUAL_SHA"
+        exit 1
+    fi
+    echo "    SHA-256 verified"
+
+    # Extract Node.js
+    echo "    Extracting..."
+    mkdir -p "$WORK_DIR/node-extract"
+    tar xJf "$WORK_DIR/$NODE_TARBALL" -C "$WORK_DIR/node-extract" --strip-components=1
+
+    # Rename node binary to node.real (the glibc wrapper will exec it via ld.so)
+    mv "$WORK_DIR/node-extract/bin/node" "$WORK_DIR/node-extract/bin/node.real"
+
+    # Create the supplement archive
+    tar -czf "$ASSETS_DIR/node-supplement.tar.gz" -C "$WORK_DIR/node-extract" .
+    echo "    Node supplement: $(ls -lh "$ASSETS_DIR/node-supplement.tar.gz" | awk '{print $5}')"
+    echo "    Node binary: $(file "$WORK_DIR/node-extract/bin/node.real" 2>/dev/null | grep -o 'ELF.*' | head -c 80 || echo '(file tool unavailable)')"
+fi
+
+# ── 4. Pack OpenClaw as tar.gz ───────────────────────────────────────────────
+echo ""
+echo "[4/4] Packing OpenClaw npm package..."
+
+if [ -f "$ASSETS_DIR/openclaw.tar.gz" ]; then
+    echo "    Already exists, skipping."
+else
+    npm install -g openclaw@latest --prefix "$WORK_DIR/openclaw_install" 2>/dev/null || {
+        echo "    WARNING: openclaw npm package not found or install failed."
+        echo "    Creating empty placeholder."
+        mkdir -p "$WORK_DIR/openclaw_install/lib/node_modules/openclaw"
+        echo '{"name":"openclaw","version":"0.0.0","main":"index.js"}' > \
+            "$WORK_DIR/openclaw_install/lib/node_modules/openclaw/package.json"
+        echo 'console.log("OpenClaw placeholder");' > \
+            "$WORK_DIR/openclaw_install/lib/node_modules/openclaw/index.js"
+    }
+
+    mkdir -p "$WORK_DIR/openclaw_bundle"
+    cp -r "$WORK_DIR/openclaw_install/lib/node_modules/openclaw" "$WORK_DIR/openclaw_bundle/openclaw"
+
+    cd "$WORK_DIR/openclaw_bundle/openclaw"
+    npm prune --omit=dev 2>/dev/null || true
+    cd - > /dev/null
+
+    tar -czf "$ASSETS_DIR/openclaw.tar.gz" -C "$WORK_DIR/openclaw_bundle" openclaw
+    echo "    OpenClaw bundle: $(ls -lh "$ASSETS_DIR/openclaw.tar.gz" | awk '{print $5}')"
+fi
 
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
@@ -172,8 +191,13 @@ echo "  Assets ready. Total size: $TOTAL"
 echo ""
 echo "  Layout:"
 echo "    bootstrap-aarch64.zip  — Termux Linux env (bin/sh, libtermux-exec.so)"
-echo "    node-supplement.tar.gz — Node.js binary + npm (from Termux)"
+echo "    glibc-libs.tar.gz     — glibc dynamic linker + runtime libs"
+echo "    node-supplement.tar.gz — Node.js v${NODE_VERSION} linux-arm64 (node.real + npm)"
 echo "    openclaw.tar.gz        — OpenClaw npm package"
+echo "    glibc-compat.js        — Android kernel quirk fixes (copied separately)"
+echo ""
+echo "  Execution chain:"
+echo "    ld-linux-aarch64.so.1 --library-path \$PREFIX/glibc/lib node.real <script>"
 echo ""
 echo "  Now build the APK:"
 echo "    ./gradlew :app:assembleDebug"

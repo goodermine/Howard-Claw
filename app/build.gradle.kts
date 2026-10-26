@@ -12,10 +12,10 @@ android {
     defaultConfig {
         applicationId = "au.howardagent"
         minSdk = 24
-        // targetSdk 28 required to allow executing Termux Node.js binaries
-        // from app data directories. Android 10+ (targetSdk 29+) enforces W^X
-        // via SELinux, blocking execution from app-private storage.
-        // This is the same approach used by codexUI/AnyClaw and Termux (F-Droid).
+        // targetSdk 28 required to execute glibc Node.js binaries via
+        // ld-linux-aarch64.so.1 from app data directories. Android 10+
+        // (targetSdk 29+) enforces W^X via SELinux, blocking execution.
+        // Same approach as openclaw-android (com.openclaw.android).
         targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
@@ -61,9 +61,9 @@ android {
 
     ndkVersion = "26.1.10909125"
 
-    // Don't compress bootstrap zip or tar.gz assets
+    // Don't compress bootstrap zip or tar.gz/tar.xz assets
     androidResources {
-        noCompress += listOf("zip", "tar.gz")
+        noCompress += listOf("zip", "tar.gz", "tar.xz", "js")
     }
 }
 
@@ -83,15 +83,16 @@ val bundleAssetsTask = tasks.register("bundleOpenClawAssets") {
 
     val assetsDir = file("src/main/assets")
     val bootstrap = file("src/main/assets/bootstrap-aarch64.zip")
+    val glibcLibs = file("src/main/assets/glibc-libs.tar.gz")
     val nodeBundle = file("src/main/assets/node-supplement.tar.gz")
     val openclaw = file("src/main/assets/openclaw.tar.gz")
     val script = rootProject.file("scripts/bundle_assets.sh")
 
-    outputs.files(bootstrap, nodeBundle, openclaw)
+    outputs.files(bootstrap, glibcLibs, nodeBundle, openclaw)
 
     doLast {
         assetsDir.mkdirs()
-        val allPresent = bootstrap.exists() && nodeBundle.exists() && openclaw.exists()
+        val allPresent = bootstrap.exists() && glibcLibs.exists() && nodeBundle.exists() && openclaw.exists()
         if (allPresent) {
             logger.lifecycle("Howard assets already bundled (${assetsDir}); skipping.")
             return@doLast

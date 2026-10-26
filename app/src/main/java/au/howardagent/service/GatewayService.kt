@@ -1,7 +1,6 @@
 package au.howardagent.service
 
 import android.app.*
-import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
@@ -27,6 +26,8 @@ class GatewayService : Service() {
 
         const val ACTION_START    = "au.howardagent.GATEWAY_START"
         const val ACTION_STOP     = "au.howardagent.GATEWAY_STOP"
+
+        private val HEALTH_PATHS = listOf("/health", "/api/health", "/healthz", "/")
 
         private val _status = MutableStateFlow("stopped")
         val status: StateFlow<String> = _status.asStateFlow()
@@ -77,10 +78,16 @@ class GatewayService : Service() {
                     }
                 }
 
-                setStatus("installing_node")
                 val paths = BootstrapInstaller.getPaths(this@GatewayService)
+
+                setStatus("installing_glibc")
+                updateNotification("Installing glibc runtime...")
+                extractGlibcLibs(paths)
+                installGlibcCompat(paths)
+
+                setStatus("installing_node")
                 if (!isNodeInstalled(paths)) {
-                    updateNotification("Installing Node.js...")
+                    updateNotification("Installing Node.js (glibc)...")
                     installNode(paths) { msg -> updateNotification(msg) }
                 }
 
@@ -93,8 +100,20 @@ class GatewayService : Service() {
                 setStatus("starting_server")
                 startServer(paths)
 
-                delay(3000)
-                if (isGatewayOnline()) {
+                // Exponential backoff health check (from codex/fix-gateway-start-issue)
+                var backoffMs = 1500L
+                var online = false
+                repeat(10) { attempt ->
+                    delay(backoffMs)
+                    if (isGatewayOnline()) {
+                        online = true
+                        return@repeat
+                    }
+                    Log.d(TAG, "Health check attempt ${attempt + 1}/10 failed")
+                    backoffMs = (backoffMs * 2).coerceAtMost(8000L)
+                }
+
+                if (online) {
                     setStatus("online")
                     updateNotification("Howard online — port $GATEWAY_PORT")
                 } else {
@@ -129,14 +148,14 @@ class GatewayService : Service() {
         _status.value = value
     }
 
-    // ── Shell helpers (from codexUI) ───────────────────────────────────────
+    // ── Shell helpers ─────────────────────────────────────────────────────
 
     private fun runInPrefix(
         paths: BootstrapInstaller.Paths,
         command: String,
         onOutput: ((String) -> Unit)? = null,
     ): Int {
-        val env = buildEnvironment(paths)
+        val env = buildShellEnvironment(paths)
         val shell = "${paths.prefixDir}/bin/sh"
 
         val pb = ProcessBuilder(shell, "-c", command)
@@ -156,122 +175,168 @@ class GatewayService : Service() {
         return proc.waitFor()
     }
 
-    // ── Install checks ─────────────────────────────────────────────────────
+    // ── Install checks ────────────────────────────────────────────────────
 
     private fun isNodeInstalled(paths: BootstrapInstaller.Paths): Boolean {
-        return File(paths.prefixDir, "bin/node").exists()
+        val nodeReal = File(paths.homeDir, ".openclaw-android/node/bin/node.real")
+        val glibcLdSo = File(paths.prefixDir, "glibc/lib/ld-linux-aarch64.so.1")
+        return nodeReal.exists() && glibcLdSo.exists()
     }
 
     private fun isOpenClawInstalled(paths: BootstrapInstaller.Paths): Boolean {
         return File(paths.prefixDir, "lib/node_modules/openclaw").exists()
     }
 
-    // ── Node.js installation (from codexUI pattern) ────────────────────────
+    // ── glibc extraction ──────────────────────────────────────────────────
+
+    private fun extractGlibcLibs(paths: BootstrapInstaller.Paths) {
+        val glibcLdSo = File(paths.prefixDir, "glibc/lib/ld-linux-aarch64.so.1")
+        if (glibcLdSo.exists()) {
+            Log.i(TAG, "glibc libs already extracted")
+            return
+        }
+
+        try {
+            assets.open("glibc-libs.tar.gz").use { /* exists check */ }
+        } catch (_: Exception) {
+            throw RuntimeException(
+                "glibc-libs.tar.gz not found in assets — rebuild APK with updated bundle_assets.sh"
+            )
+        }
+
+        Log.i(TAG, "Extracting glibc runtime libraries...")
+        val glibcDir = File(paths.prefixDir, "glibc/lib")
+        glibcDir.mkdirs()
+
+        val tmpFile = File(paths.tmpDir, "glibc-libs.tar.gz")
+        try {
+            File(paths.tmpDir).mkdirs()
+            assets.open("glibc-libs.tar.gz").use { input ->
+                tmpFile.outputStream().use { output -> input.copyTo(output) }
+            }
+
+            val exitCode = runInPrefix(
+                paths,
+                "tar -xzf ${tmpFile.absolutePath} -C ${paths.prefixDir}/glibc && " +
+                    "chmod 755 ${paths.prefixDir}/glibc/lib/ld-linux-aarch64.so.1 2>/dev/null && " +
+                    "echo done"
+            )
+            tmpFile.delete()
+
+            if (exitCode != 0 || !glibcLdSo.exists()) {
+                throw RuntimeException("glibc extraction failed (exit $exitCode)")
+            }
+        } catch (e: RuntimeException) {
+            throw e
+        } catch (e: Exception) {
+            tmpFile.delete()
+            throw RuntimeException("glibc extraction failed: ${e.message}", e)
+        }
+
+        // glibc's getaddrinfo reads $PREFIX/glibc/etc/hosts for localhost resolution.
+        // Without it, dns.lookup('localhost') can return 0.0.0.0 → gateway bind failure.
+        val glibcEtc = File(paths.prefixDir, "glibc/etc")
+        glibcEtc.mkdirs()
+        val hostsFile = File(glibcEtc, "hosts")
+        if (!hostsFile.exists()) {
+            hostsFile.writeText(
+                "127.0.0.1 localhost localhost.localdomain\n" +
+                    "::1 localhost ip6-localhost ip6-loopback\n"
+            )
+        }
+
+        Log.i(TAG, "glibc runtime extracted to ${paths.prefixDir}/glibc/")
+    }
+
+    private fun installGlibcCompat(paths: BootstrapInstaller.Paths) {
+        val destDir = File(paths.prefixDir, "share/howard")
+        destDir.mkdirs()
+        val dest = File(destDir, "glibc-compat.js")
+        if (dest.exists() && dest.length() > 0) return
+
+        try {
+            assets.open("glibc-compat.js").use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            Log.i(TAG, "glibc-compat.js installed")
+        } catch (e: Exception) {
+            Log.w(TAG, "glibc-compat.js not found in assets — Android quirk fixes unavailable", e)
+        }
+    }
+
+    // ── Node.js installation (glibc approach) ─────────────────────────────
 
     private fun installNode(
         paths: BootstrapInstaller.Paths,
         onProgress: (String) -> Unit,
     ) {
-        val prefix = paths.prefixDir
-        val termuxPrefix = "/data/data/com.termux/files/usr"
-
-        if (extractNodeSupplement(paths)) {
-            onProgress("Node.js extracted from bundle")
+        if (extractNodeBundle(paths)) {
+            onProgress("Node.js (glibc) extracted from bundle")
             return
         }
-
-        onProgress("Downloading Node.js packages…")
-        val downloadCmd = """
-            cd $prefix/tmp &&
-            apt-get update --allow-insecure-repositories 2>&1;
-            apt-get download --allow-unauthenticated c-ares libicu libsqlite nodejs-lts npm 2>&1
-        """.trimIndent()
-
-        runInPrefix(paths, downloadCmd) { onProgress(it) }
-
-        onProgress("Extracting Node.js packages…")
-        val extractCmd = """
-            cd $prefix/tmp &&
-            mkdir -p _stage &&
-            for deb in *.deb; do
-                echo "Extracting ${'$'}deb..." &&
-                dpkg-deb -x "${'$'}deb" _stage/ 2>&1
-            done &&
-            if [ -d "_stage$termuxPrefix" ]; then
-                cp -a _stage$termuxPrefix/* "$prefix/" 2>&1
-            elif [ -d "_stage/usr" ]; then
-                cp -a _stage/usr/* "$prefix/" 2>&1
-            fi &&
-            rm -rf _stage *.deb 2>/dev/null
-            echo "done"
-        """.trimIndent()
-
-        val extractCode = runInPrefix(paths, extractCmd) { onProgress(it) }
-        if (extractCode != 0) {
-            Log.e(TAG, "dpkg-deb extract failed with code $extractCode")
-        }
-
-        onProgress("Fixing script paths…")
-        val appDataDir = filesDir.parentFile?.absolutePath ?: "/data/user/0/au.howardagent"
-        val fixCmd = """
-            chmod 700 "$prefix/bin/node" 2>/dev/null
-
-            NPM_CLI="$prefix/lib/node_modules/npm/bin/npm-cli.js"
-            if [ -f "${'$'}NPM_CLI" ]; then
-                rm -f "$prefix/bin/npm"
-                cat > "$prefix/bin/npm" << 'WEOF'
-#!/$appDataDir/files/usr/bin/sh
-exec $appDataDir/files/usr/bin/node $appDataDir/files/usr/lib/node_modules/npm/bin/npm-cli.js "${'$'}@"
-WEOF
-                chmod 700 "$prefix/bin/npm"
-            fi
-
-            echo "Wrapper scripts created"
-        """.trimIndent()
-        runInPrefix(paths, fixCmd) { onProgress(it) }
-
-        if (!isNodeInstalled(paths)) {
-            throw RuntimeException("Node.js installation failed")
-        }
-        Log.i(TAG, "Node.js installed successfully")
+        throw RuntimeException(
+            "node-supplement.tar.gz not found in assets — rebuild APK with updated bundle_assets.sh"
+        )
     }
 
-    private fun extractNodeSupplement(paths: BootstrapInstaller.Paths): Boolean {
+    private fun extractNodeBundle(paths: BootstrapInstaller.Paths): Boolean {
         try {
             assets.open("node-supplement.tar.gz").use { /* exists check */ }
         } catch (_: Exception) {
             return false
         }
 
-        Log.i(TAG, "Extracting Node.js from bundled supplement...")
+        Log.i(TAG, "Extracting Node.js (glibc, linux-arm64)...")
+        val nodeDir = File(paths.homeDir, ".openclaw-android/node")
+        nodeDir.mkdirs()
+
         val tmpFile = File(paths.tmpDir, "node-supplement.tar.gz")
         try {
             File(paths.tmpDir).mkdirs()
             assets.open("node-supplement.tar.gz").use { input ->
-                tmpFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                tmpFile.outputStream().use { output -> input.copyTo(output) }
             }
 
-            val exitCode = runInPrefix(paths,
-                "tar -xzf ${tmpFile.absolutePath} -C ${paths.prefixDir} && " +
-                "chmod 700 ${paths.prefixDir}/bin/node 2>/dev/null && " +
-                "echo done"
+            val exitCode = runInPrefix(
+                paths,
+                "tar -xzf ${tmpFile.absolutePath} -C ${nodeDir.absolutePath} && " +
+                    "chmod 755 ${nodeDir.absolutePath}/bin/node.real 2>/dev/null && " +
+                    "echo done"
             )
             tmpFile.delete()
 
-            if (exitCode == 0 && isNodeInstalled(paths)) {
-                Log.i(TAG, "Node.js supplement extracted successfully")
-                return true
+            val nodeReal = File(nodeDir, "bin/node.real")
+            if (exitCode == 0 && nodeReal.exists()) {
+                // Verify the binary runs via glibc ld.so
+                val glibcLdSo = "${paths.prefixDir}/glibc/lib/ld-linux-aarch64.so.1"
+                val glibcLibDir = "${paths.prefixDir}/glibc/lib"
+                val verifyPb = ProcessBuilder(
+                    glibcLdSo, "--library-path", glibcLibDir,
+                    nodeReal.absolutePath, "--version"
+                )
+                verifyPb.environment().clear()
+                verifyPb.environment()["HOME"] = paths.homeDir
+                verifyPb.environment()["TMPDIR"] = paths.tmpDir
+                verifyPb.redirectErrorStream(true)
+
+                val verifyProc = verifyPb.start()
+                val version = verifyProc.inputStream.bufferedReader().readText().trim()
+                val verifyCode = verifyProc.waitFor()
+
+                if (verifyCode == 0 && version.startsWith("v")) {
+                    Log.i(TAG, "Node.js $version verified via glibc ld.so")
+                    return true
+                }
+                Log.e(TAG, "Node.js verification failed: exit=$verifyCode output='$version'")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract Node supplement: ${e.message}", e)
+            Log.e(TAG, "Failed to extract Node bundle: ${e.message}", e)
         }
         tmpFile.delete()
         return false
     }
 
-    // ── OpenClaw installation ──────────────────────────────────────────────
+    // ── OpenClaw installation ─────────────────────────────────────────────
 
     private fun extractOpenClaw(
         paths: BootstrapInstaller.Paths,
@@ -287,18 +352,37 @@ WEOF
         }
 
         onProgress("Installing OpenClaw via npm…")
-        val prefix = paths.prefixDir
-        val npmCli = "$prefix/lib/node_modules/npm/bin/npm-cli.js"
+        val glibcLdSo = "${paths.prefixDir}/glibc/lib/ld-linux-aarch64.so.1"
+        val glibcLibDir = "${paths.prefixDir}/glibc/lib"
+        val nodeReal = "${paths.homeDir}/.openclaw-android/node/bin/node.real"
+        val nodeDir = "${paths.homeDir}/.openclaw-android/node"
+        val npmCli = "$nodeDir/lib/node_modules/npm/bin/npm-cli.js"
 
-        val code = runInPrefix(paths,
-            "node $npmCli install -g openclaw 2>&1"
-        ) { onProgress(it) }
+        val env = buildGlibcEnvironment(paths)
+        val pb = ProcessBuilder(
+            glibcLdSo, "--library-path", glibcLibDir,
+            nodeReal, npmCli, "install", "-g", "openclaw",
+            "--prefix", paths.prefixDir
+        )
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.directory(File(paths.homeDir))
+        pb.redirectErrorStream(true)
+
+        val proc = pb.start()
+        val reader = BufferedReader(InputStreamReader(proc.inputStream))
+        var line = reader.readLine()
+        while (line != null) {
+            Log.d(TAG, "[npm] $line")
+            onProgress(line)
+            line = reader.readLine()
+        }
+        val code = proc.waitFor()
 
         if (code != 0) {
             Log.e(TAG, "npm install openclaw failed with code $code")
             throw RuntimeException("OpenClaw installation failed")
         }
-
         Log.i(TAG, "OpenClaw installed via npm")
     }
 
@@ -317,12 +401,11 @@ WEOF
         try {
             File(paths.tmpDir).mkdirs()
             assets.open("openclaw.tar.gz").use { input ->
-                tmpFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                tmpFile.outputStream().use { output -> input.copyTo(output) }
             }
 
-            val exitCode = runInPrefix(paths,
+            val exitCode = runInPrefix(
+                paths,
                 "tar -xzf ${tmpFile.absolutePath} -C ${nodeModulesDir.absolutePath} && echo done"
             )
             tmpFile.delete()
@@ -338,23 +421,28 @@ WEOF
         return false
     }
 
-    // ── Server lifecycle ───────────────────────────────────────────────────
+    // ── Server lifecycle ──────────────────────────────────────────────────
 
     private fun startServer(paths: BootstrapInstaller.Paths) {
-        val nodeBin = File(paths.prefixDir, "bin/node")
+        val glibcLdSo = File(paths.prefixDir, "glibc/lib/ld-linux-aarch64.so.1")
+        val nodeReal = File(paths.homeDir, ".openclaw-android/node/bin/node.real")
         val openclawDir = File(paths.prefixDir, "lib/node_modules/openclaw")
 
-        if (!nodeBin.exists()) {
-            throw RuntimeException("Node binary not found at ${nodeBin.absolutePath}")
+        if (!glibcLdSo.exists()) {
+            throw RuntimeException("glibc ld.so not found at ${glibcLdSo.absolutePath}")
         }
-
+        if (!nodeReal.exists()) {
+            throw RuntimeException("node.real not found at ${nodeReal.absolutePath}")
+        }
         if (!openclawDir.exists()) {
             throw RuntimeException("OpenClaw not found at ${openclawDir.absolutePath}")
         }
 
         val entryPoint = when {
-            File(openclawDir, "dist/index.js").exists() -> File(openclawDir, "dist/index.js").absolutePath
             File(openclawDir, "openclaw.mjs").exists() -> File(openclawDir, "openclaw.mjs").absolutePath
+            File(openclawDir, "dist/index.js").exists() -> File(openclawDir, "dist/index.js").absolutePath
+            File(openclawDir, "dist/index.mjs").exists() -> File(openclawDir, "dist/index.mjs").absolutePath
+            File(openclawDir, "dist/entry.js").exists() -> File(openclawDir, "dist/entry.js").absolutePath
             File(openclawDir, "index.js").exists() -> File(openclawDir, "index.js").absolutePath
             else -> throw RuntimeException("No OpenClaw entry point found in ${openclawDir.absolutePath}")
         }
@@ -362,21 +450,23 @@ WEOF
         val configDir = File(paths.homeDir, ".openclaw").also { it.mkdirs() }
         val configFile = File(configDir, "openclaw.json")
         if (!configFile.exists()) {
-            configFile.writeText("""
-                {
-                    "port": $GATEWAY_PORT,
-                    "host": "127.0.0.1"
-                }
-            """.trimIndent())
+            configFile.writeText(
+                "{\n" +
+                    "  \"port\": $GATEWAY_PORT,\n" +
+                    "  \"host\": \"127.0.0.1\"\n" +
+                    "}"
+            )
         }
 
-        Log.i(TAG, "Starting server: node $entryPoint")
+        Log.i(TAG, "Starting server via glibc ld.so: ${nodeReal.absolutePath} $entryPoint gateway")
 
-        val env = buildEnvironment(paths)
-        val shell = "${paths.prefixDir}/bin/sh"
-        val command = "exec node $entryPoint"
-
-        val pb = ProcessBuilder(shell, "-c", command)
+        val env = buildGlibcEnvironment(paths)
+        val pb = ProcessBuilder(
+            glibcLdSo.absolutePath,
+            "--library-path", "${paths.prefixDir}/glibc/lib",
+            nodeReal.absolutePath,
+            entryPoint, "gateway"
+        )
         pb.environment().clear()
         pb.environment().putAll(env)
         pb.environment()["PORT"] = GATEWAY_PORT.toString()
@@ -431,49 +521,136 @@ WEOF
         }
     }
 
-    // ── Environment ────────────────────────────────────────────────────────
+    // ── Environment ───────────────────────────────────────────────────────
 
-    private fun buildEnvironment(paths: BootstrapInstaller.Paths): Map<String, String> {
-        return mapOf(
-            "PREFIX" to paths.prefixDir,
-            "HOME" to paths.homeDir,
-            "PATH" to "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin",
-            "LD_LIBRARY_PATH" to "${paths.prefixDir}/lib",
-            "LD_PRELOAD" to "${paths.prefixDir}/lib/libtermux-exec.so",
-            "TERMUX_PREFIX" to paths.prefixDir,
-            "TERMUX__PREFIX" to paths.prefixDir,
-            "LANG" to "en_US.UTF-8",
-            "TMPDIR" to paths.tmpDir,
-            "TERM" to "xterm-256color",
-            "ANDROID_DATA" to "/data",
-            "ANDROID_ROOT" to "/system",
-            "APT_CONFIG" to "${paths.prefixDir}/etc/apt/apt.conf",
-            "DPKG_ADMINDIR" to "${paths.prefixDir}/var/lib/dpkg",
-            "SSL_CERT_FILE" to "${paths.prefixDir}/etc/tls/cert.pem",
-            "SSL_CERT_DIR" to "/system/etc/security/cacerts",
-            "CURL_CA_BUNDLE" to "${paths.prefixDir}/etc/tls/cert.pem",
-            "GIT_SSL_CAINFO" to "${paths.prefixDir}/etc/tls/cert.pem",
-            "NODE_OPTIONS" to "--openssl-config=${paths.prefixDir}/etc/tls/openssl.cnf",
-        )
-    }
-
-    // ── Health check ──────────────────────────────────────────────────────
-
-    fun isGatewayOnline(): Boolean {
-        return try {
-            val conn = URL("http://127.0.0.1:$GATEWAY_PORT/health")
-                .openConnection() as HttpURLConnection
-            conn.connectTimeout = 2000
-            conn.readTimeout = 2000
-            val code = conn.responseCode
-            conn.disconnect()
-            code in 200..399
-        } catch (_: Exception) {
-            false
+    /**
+     * Environment for running shell commands via $PREFIX/bin/sh (bootstrap utilities like tar).
+     * Uses LD_PRELOAD for libtermux-exec path rewriting — needed for Bionic-linked bootstrap
+     * binaries but must NOT be set for glibc processes.
+     */
+    private fun buildShellEnvironment(paths: BootstrapInstaller.Paths): Map<String, String> {
+        val appDataDir = filesDir.parentFile?.absolutePath ?: "/data/user/0/au.howardagent"
+        return buildMap {
+            put("PREFIX", paths.prefixDir)
+            put("HOME", paths.homeDir)
+            put("PATH", "${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")
+            put("LD_LIBRARY_PATH", "${paths.prefixDir}/lib")
+            val termuxExecLib = File(paths.prefixDir, "lib/libtermux-exec.so")
+            if (termuxExecLib.exists()) {
+                put("LD_PRELOAD", termuxExecLib.absolutePath)
+            }
+            put("TERMUX_PREFIX", paths.prefixDir)
+            put("TERMUX__PREFIX", paths.prefixDir)
+            put("TERMUX__ROOTFS", paths.filesDir)
+            put("TERMUX_APP__DATA_DIR", appDataDir)
+            put("TERMUX_APP__LEGACY_DATA_DIR", "/data/data/com.termux")
+            put("LANG", "en_US.UTF-8")
+            put("TMPDIR", paths.tmpDir)
+            put("TERM", "xterm-256color")
+            put("ANDROID_DATA", "/data")
+            put("ANDROID_ROOT", "/system")
+            put("APT_CONFIG", "${paths.prefixDir}/etc/apt/apt.conf")
+            put("DPKG_ADMINDIR", "${paths.prefixDir}/var/lib/dpkg")
+            put("DPKG_ROOT", paths.prefixDir)
+            put("SSL_CERT_FILE", "${paths.prefixDir}/etc/tls/cert.pem")
+            put("SSL_CERT_DIR", "/system/etc/security/cacerts")
+            put("CURL_CA_BUNDLE", "${paths.prefixDir}/etc/tls/cert.pem")
+            put("GIT_SSL_CAINFO", "${paths.prefixDir}/etc/tls/cert.pem")
+            put("GIT_CONFIG_NOSYSTEM", "1")
         }
     }
 
-    // ── Notifications ───────────────────────────────────────────────────────
+    /**
+     * Environment for running glibc Node.js via ld-linux-aarch64.so.1.
+     * Critical: LD_PRELOAD must NOT be set — Bionic's libtermux-exec.so causes
+     * "Could not find a PHDR" crashes when loaded into glibc processes.
+     * Based on openclaw-android's EnvironmentBuilder + node wrapper.
+     */
+    private fun buildGlibcEnvironment(paths: BootstrapInstaller.Paths): Map<String, String> {
+        val appDataDir = filesDir.parentFile?.absolutePath ?: "/data/user/0/au.howardagent"
+        val nodeDir = "${paths.homeDir}/.openclaw-android/node"
+        val binDir = "${paths.homeDir}/.openclaw-android/bin"
+        val glibcCompat = "${paths.prefixDir}/share/howard/glibc-compat.js"
+
+        return buildMap {
+            put("PREFIX", paths.prefixDir)
+            put("HOME", paths.homeDir)
+            put("TMPDIR", paths.tmpDir)
+            put("TMP", paths.tmpDir)
+            put("TEMP", paths.tmpDir)
+
+            put("PATH", "$binDir:$nodeDir/bin:${paths.prefixDir}/bin:${paths.prefixDir}/bin/applets:/system/bin")
+            put("LD_LIBRARY_PATH", "${paths.prefixDir}/glibc/lib:${paths.prefixDir}/lib")
+
+            // DO NOT set LD_PRELOAD — glibc processes must not load Bionic libtermux-exec.so
+            // libtermux-exec path rewriting vars (for processes that do need it)
+            put("TERMUX_PREFIX", paths.prefixDir)
+            put("TERMUX__PREFIX", paths.prefixDir)
+            put("TERMUX__ROOTFS", paths.filesDir)
+            put("TERMUX_APP__DATA_DIR", appDataDir)
+            put("TERMUX_APP__LEGACY_DATA_DIR", "/data/data/com.termux")
+
+            // glibc-compat.js fixes Android kernel quirks (os.cpus(), networkInterfaces, DNS, spawn)
+            if (File(glibcCompat).exists()) {
+                put("NODE_OPTIONS", "-r $glibcCompat")
+            }
+
+            // Prevent SIGSYS from openat2 syscall (Android seccomp)
+            put("FS_SAFE_TEST_NO_OPENAT2", "1")
+            // Prevent OpenClaw self-update
+            put("OPENCLAW_NO_AUTO_UPDATE", "1")
+            // Mark as glibc environment
+            put("OA_GLIBC", "1")
+            put("CONTAINER", "1")
+
+            // apt/dpkg
+            put("APT_CONFIG", "${paths.prefixDir}/etc/apt/apt.conf")
+            put("DPKG_ADMINDIR", "${paths.prefixDir}/var/lib/dpkg")
+            put("DPKG_ROOT", paths.prefixDir)
+
+            // SSL/TLS
+            put("SSL_CERT_FILE", "${paths.prefixDir}/etc/tls/cert.pem")
+            put("CURL_CA_BUNDLE", "${paths.prefixDir}/etc/tls/cert.pem")
+            put("GIT_SSL_CAINFO", "${paths.prefixDir}/etc/tls/cert.pem")
+
+            // Git
+            put("GIT_CONFIG_NOSYSTEM", "1")
+            put("GIT_EXEC_PATH", "${paths.prefixDir}/libexec/git-core")
+            put("GIT_TEMPLATE_DIR", "${paths.prefixDir}/share/git-core/templates")
+
+            // Locale and terminal
+            put("LANG", "en_US.UTF-8")
+            put("TERM", "xterm-256color")
+
+            // Android
+            put("ANDROID_DATA", "/data")
+            put("ANDROID_ROOT", "/system")
+
+            // OpenClaw workspace
+            put("CLAWDHUB_WORKDIR", "${paths.homeDir}/.openclaw/workspace")
+        }
+    }
+
+    // ── Health check (multi-path, from codex/fix-gateway-start-issue) ─────
+
+    fun isGatewayOnline(): Boolean {
+        for (path in HEALTH_PATHS) {
+            try {
+                val conn = URL("http://127.0.0.1:$GATEWAY_PORT$path")
+                    .openConnection() as HttpURLConnection
+                conn.connectTimeout = 2000
+                conn.readTimeout = 2000
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..399) return true
+            } catch (_: Exception) {
+                // try next path
+            }
+        }
+        return false
+    }
+
+    // ── Notifications ─────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
